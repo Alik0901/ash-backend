@@ -8,7 +8,7 @@ router.post('/', (req, res) => {
   const { initData } = req.body;
 
   if (!initData || !BOT_TOKEN) {
-    return res.status(400).json({ ok: false, error: 'Missing initData or BOT_TOKEN' });
+    return res.status(400).json({ ok: false, error: 'Missing initData or token' });
   }
 
   try {
