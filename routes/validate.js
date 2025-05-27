@@ -25,11 +25,12 @@ router.post('/', (req, res) => {
     const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
     if (hmac !== hash) {
-      console.warn('[❌] Invalid signature:', hmac, '!=', hash);
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    const user = JSON.parse(parsed.get('user'));
+    const userRaw = parsed.get('user');
+    const user = JSON.parse(userRaw);
+
     return res.json({ ok: true, user });
   } catch (err) {
     console.error('[VALIDATE ERROR]', err);
