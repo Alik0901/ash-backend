@@ -1,8 +1,7 @@
-const express = require('express');
-const crypto = require('crypto');
-const router = express.Router();
+import express from 'express';
+import crypto from 'crypto';
 
-// Подключи переменную окружения в Railway
+const router = express.Router();
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
 router.post('/', (req, res) => {
@@ -39,5 +38,4 @@ router.post('/', (req, res) => {
   }
 });
 
-module.exports = router;
 export default router;
