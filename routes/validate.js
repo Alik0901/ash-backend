@@ -14,25 +14,27 @@ router.post('/', (req, res) => {
 
   try {
     // 1. Разбор параметров
-    const parsed = new URLSearchParams(decodeURIComponent(initData)); // ✅ Раскодировать
-const hash = parsed.get('hash');
-parsed.delete('hash');
+    const parsed = new URLSearchParams(initData); // ✅ Раскодировать
+    const hash = parsed.get('hash');
+    parsed.delete('hash');
 
     // 2. Формируем строку проверки
     const dataCheckString = [...parsed.entries()]
-  .map(([key, val]) => `${key}=${val}`)
-  .sort()
-  .join('\n');
+      .map(([key, val]) => `${key}=${val}`)
+      .sort()
+      .join('\n');
 
     // 3. Вычисляем секрет и HMAC
    const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
-const secret = crypto.createHash('sha256').update(secretPart).digest();
-const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+   const secret = crypto.createHash('sha256').update(secretPart).digest();
+   const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
     // 4. Логируем
     console.log('\n🔍 INIT VALIDATION');
     console.log('BOT_TOKEN:', BOT_TOKEN);
     console.log('Secret part:', secretPart);
+    console.log('🔧 Raw initData:', initData);
+    console.log('📦 Parsed entries:', [...parsed.entries()]);
     console.log('dataCheckString:', dataCheckString);
     console.log('expected HMAC:', hmac);
     console.log('received hash:', hash);
