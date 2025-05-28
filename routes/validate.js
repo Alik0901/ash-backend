@@ -13,40 +13,39 @@ router.post('/', (req, res) => {
   }
 
   try {
-    // ✅ Парсим строку запроса
+    // 1. Разбор параметров
     const parsed = new URLSearchParams(initData);
     const hash = parsed.get('hash');
     parsed.delete('hash');
 
-    // ✅ Создаем строку для подписи
+    // 2. Формируем строку проверки
     const dataCheckString = [...parsed.entries()]
       .map(([key, val]) => `${key}=${val}`)
       .sort()
       .join('\n');
 
-    // ✅ Извлекаем часть токена после двоеточия (если есть)
+    // 3. Вычисляем секрет и HMAC
     const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
     const secret = crypto.createHash('sha256').update(secretPart).digest();
+    const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
-    const hmac = crypto.createHmac('sha256', secret)
-      .update(dataCheckString)
-      .digest('hex');
-
-    // ✅ Отладочные логи
-    console.log('🔐 VALIDATE FINAL');
+    // 4. Логирование
+    console.log('\n🔐 VALIDATE FINAL');
+    console.log('BOT_TOKEN:', BOT_TOKEN);
+    console.log('Secret part:', secretPart);
     console.log('dataCheckString:', dataCheckString);
     console.log('query_id:', parsed.get('query_id'));
-    console.log('signature:', hash);
-    console.log('user=', parsed.get('user'));
-    console.log('expected HMAC:', hmac);
+    console.log('signature:', hmac);
     console.log('received hash:', hash);
 
-    if (hmac !== hash) {
+    // 5. Сравнение HMAC и подписи
+    const isValid = hmac === hash?.trim()?.replace(/\s/g, '');
+    if (!isValid) {
       console.warn('❌ Invalid signature');
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    // ✅ Если всё хорошо, парсим user
+    // 6. Извлекаем пользователя
     const userRaw = parsed.get('user');
     const user = JSON.parse(userRaw);
 
