@@ -12,32 +12,33 @@ router.post('/', (req, res) => {
   }
 
   try {
-    const hash = new URLSearchParams(initData).get('hash');
+    const searchParams = new URLSearchParams(initData);
+    const receivedHash = searchParams.get('hash');
 
-    // Парсим вручную, чтобы не терять кодировку и порядок
-    const keyValuePairs = initData
+    // Сортируем и формируем строку без hash
+    const dataCheckString = initData
       .split('&')
-      .filter((entry) => !entry.startsWith('hash='))
-      .sort();
+      .filter((x) => !x.startsWith('hash='))
+      .sort()
+      .join('\n');
 
-    const dataCheckString = keyValuePairs.join('\n');
+    const token = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
+    const secret = crypto.createHash('sha256').update(token).digest();
+    const hmac = crypto
+      .createHmac('sha256', secret)
+      .update(dataCheckString)
+      .digest('base64'); // ❗ Это важно
 
-    const secretKey = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
-    const secret = crypto.createHash('sha256').update(secretKey).digest();
-    const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
-
-    // Отладка
-    console.log('\n🔐 VALIDATE FIXED 2');
+    console.log('\n✅ VALIDATE FINAL 🔐');
     console.log('dataCheckString:', dataCheckString);
     console.log('expected HMAC:', hmac);
-    console.log('received hash:', hash);
+    console.log('received hash:', receivedHash);
 
-    if (hmac !== hash) {
+    if (hmac !== receivedHash) {
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    // Получаем и декодируем user
-    const rawUser = new URLSearchParams(initData).get('user');
+    const rawUser = searchParams.get('user');
     const user = JSON.parse(decodeURIComponent(rawUser));
 
     return res.json({ ok: true, user });
