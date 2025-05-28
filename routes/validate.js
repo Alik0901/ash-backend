@@ -8,43 +8,49 @@ router.post('/', (req, res) => {
   const { initData } = req.body;
 
   if (!initData || !BOT_TOKEN) {
+    console.warn('[VALIDATE] ❌ Missing initData or BOT_TOKEN');
     return res.status(400).json({ ok: false, error: 'Missing initData or token' });
   }
 
   try {
-    // Разбиваем вручную
-    const rawParts = initData.split('&');
-    const parsed = [];
-    let hash = '';
+    // ✅ Парсим строку запроса
+    const parsed = new URLSearchParams(initData);
+    const hash = parsed.get('hash');
+    parsed.delete('hash');
 
-    for (const part of rawParts) {
-      if (part.startsWith('hash=')) {
-        hash = part.replace('hash=', '');
-      } else {
-        parsed.push(part);
-      }
-    }
+    // ✅ Создаем строку для подписи
+    const dataCheckString = [...parsed.entries()]
+      .map(([key, val]) => `${key}=${val}`)
+      .sort()
+      .join('\n');
 
-    const dataCheckString = parsed.sort().join('\n');
+    // ✅ Извлекаем часть токена после двоеточия (если есть)
+    const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
+    const secret = crypto.createHash('sha256').update(secretPart).digest();
 
-    const token = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
-    const secret = crypto.createHash('sha256').update(token).digest();
-    const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+    const hmac = crypto.createHmac('sha256', secret)
+      .update(dataCheckString)
+      .digest('hex');
 
-    console.log('\n🔐 VALIDATE FINAL');
+    // ✅ Отладочные логи
+    console.log('🔐 VALIDATE FINAL');
     console.log('dataCheckString:', dataCheckString);
+    console.log('query_id:', parsed.get('query_id'));
+    console.log('signature:', hash);
+    console.log('user=', parsed.get('user'));
     console.log('expected HMAC:', hmac);
     console.log('received hash:', hash);
 
     if (hmac !== hash) {
+      console.warn('❌ Invalid signature');
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    // Извлекаем user вручную
-    const userParam = rawParts.find(p => p.startsWith('user='));
-    const userRaw = userParam?.substring(5);
-    const user = JSON.parse(decodeURIComponent(userRaw));
+    // ✅ Если всё хорошо, парсим user
+    const userRaw = parsed.get('user');
+    const user = JSON.parse(userRaw);
 
+    console.log('✅ Signature valid. User:', user);
     return res.json({ ok: true, user });
   } catch (err) {
     console.error('[VALIDATE ERROR]', err);
