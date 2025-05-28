@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.use('/api/validate', validateRoute); // обязательно есть
+app.use('/api/validate', validateRoute);
 app.use('/api', playerRoutes);
 
 const PORT = process.env.PORT || 3001;

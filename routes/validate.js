@@ -8,7 +8,7 @@ router.post('/', (req, res) => {
   const { initData } = req.body;
 
   if (!initData || !BOT_TOKEN) {
-    return res.status(400).json({ ok: false, error: 'Missing initData or token' });
+    return res.status(400).json({ ok: false, error: 'Missing initData or BOT_TOKEN' });
   }
 
   try {
@@ -28,13 +28,11 @@ router.post('/', (req, res) => {
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    const userRaw = parsed.get('user');
-    const user = JSON.parse(userRaw);
-
+    const user = JSON.parse(parsed.get('user') || '{}');
     return res.json({ ok: true, user });
   } catch (err) {
     console.error('[VALIDATE ERROR]', err);
-    return res.status(500).json({ ok: false, error: 'Internal error' });
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
 
