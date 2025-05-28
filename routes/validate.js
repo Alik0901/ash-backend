@@ -12,25 +12,26 @@ router.post('/', (req, res) => {
   }
 
   try {
-    // Парсим initData, но НЕ декодируем значения вручную
-    const parsed = new URLSearchParams(initData);
-    const hash = parsed.get('hash');
-    parsed.delete('hash');
+    // Разбиваем вручную
+    const rawParts = initData.split('&');
+    const parsed = [];
+    let hash = '';
 
-    // Собираем строки без декодирования
-    const pairs = [];
-    for (const [key, value] of parsed) {
-      pairs.push(`${key}=${value}`);
+    for (const part of rawParts) {
+      if (part.startsWith('hash=')) {
+        hash = part.replace('hash=', '');
+      } else {
+        parsed.push(part);
+      }
     }
 
-    const dataCheckString = pairs.sort().join('\n');
+    const dataCheckString = parsed.sort().join('\n');
 
     const token = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
     const secret = crypto.createHash('sha256').update(token).digest();
     const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
-    console.log('\n📦 VALIDATION LOG');
-    console.log('initData:', initData);
+    console.log('\n🔐 VALIDATE FINAL');
     console.log('dataCheckString:', dataCheckString);
     console.log('expected HMAC:', hmac);
     console.log('received hash:', hash);
@@ -39,7 +40,9 @@ router.post('/', (req, res) => {
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    const userRaw = parsed.get('user');
+    // Извлекаем user вручную
+    const userParam = rawParts.find(p => p.startsWith('user='));
+    const userRaw = userParam?.substring(5);
     const user = JSON.parse(decodeURIComponent(userRaw));
 
     return res.json({ ok: true, user });
