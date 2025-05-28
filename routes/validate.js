@@ -13,44 +13,41 @@ router.post('/', (req, res) => {
   }
 
   try {
-    // 1. Разбор параметров
+    // 1. Распарсим initData
     const parsed = new URLSearchParams(initData);
     const hash = parsed.get('hash');
     parsed.delete('hash');
 
-    // 2. Формируем строку проверки
+    // 2. Собираем строку для подписи
     const dataCheckString = [...parsed.entries()]
-      .map(([key, val]) => `${key}=${val}`)
+      .map(([key, value]) => `${key}=${value}`)
       .sort()
       .join('\n');
 
-    // 3. Вычисляем секрет и HMAC
-    const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
-    const secret = crypto.createHash('sha256').update(secretPart).digest();
+    // 3. Вычисляем HMAC
+    const secretKey = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
+    const secret = crypto.createHash('sha256').update(secretKey).digest();
     const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
-    // 4. Логирование
+    // 4. Логируем
     console.log('\n🔐 VALIDATE FINAL');
     console.log('BOT_TOKEN:', BOT_TOKEN);
-    console.log('Secret part:', secretPart);
+    console.log('Secret part:', secretKey);
     console.log('dataCheckString:', dataCheckString);
-    console.log('query_id:', parsed.get('query_id'));
-    console.log('signature:', hmac);
+    console.log('expected HMAC:', hmac);
     console.log('received hash:', hash);
 
-    // 5. Сравнение HMAC и подписи
-    const isValid = hmac === hash?.trim()?.replace(/\s/g, '');
-    if (!isValid) {
+    // 5. Сравниваем
+    if (hmac !== hash) {
       console.warn('❌ Invalid signature');
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    // 6. Извлекаем пользователя
-    const userRaw = parsed.get('user');
-    const user = JSON.parse(userRaw);
-
+    // 6. Возвращаем данные пользователя
+    const user = JSON.parse(parsed.get('user'));
     console.log('✅ Signature valid. User:', user);
     return res.json({ ok: true, user });
+
   } catch (err) {
     console.error('[VALIDATE ERROR]', err);
     return res.status(500).json({ ok: false, error: 'Internal error' });
