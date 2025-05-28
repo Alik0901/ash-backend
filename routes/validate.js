@@ -13,41 +13,39 @@ router.post('/', (req, res) => {
   }
 
   try {
-    // 1. Распарсим initData
-    const parsed = new URLSearchParams(initData);
-    const hash = parsed.get('hash');
-    parsed.delete('hash');
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    params.delete('hash');
 
-    // 2. Собираем строку для подписи
-    const dataCheckString = [...parsed.entries()]
-      .map(([key, value]) => `${key}=${value}`)
-      .sort()
-      .join('\n');
+    // НЕ декодируем параметры, а собираем вручную
+    const keyValuePairs = initData
+      .split('&')
+      .filter((kv) => !kv.startsWith('hash='))
+      .sort();
 
-    // 3. Вычисляем HMAC
+    const dataCheckString = keyValuePairs.join('\n');
+
     const secretKey = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
     const secret = crypto.createHash('sha256').update(secretKey).digest();
     const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
 
-    // 4. Логируем
-    console.log('\n🔐 VALIDATE FINAL');
+    // Лог
+    console.log('\n🔐 VALIDATE FIXED');
     console.log('BOT_TOKEN:', BOT_TOKEN);
-    console.log('Secret part:', secretKey);
     console.log('dataCheckString:', dataCheckString);
     console.log('expected HMAC:', hmac);
     console.log('received hash:', hash);
 
-    // 5. Сравниваем
     if (hmac !== hash) {
       console.warn('❌ Invalid signature');
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    // 6. Возвращаем данные пользователя
-    const user = JSON.parse(parsed.get('user'));
+    const userJson = decodeURIComponent(params.get('user'));
+    const user = JSON.parse(userJson);
+
     console.log('✅ Signature valid. User:', user);
     return res.json({ ok: true, user });
-
   } catch (err) {
     console.error('[VALIDATE ERROR]', err);
     return res.status(500).json({ ok: false, error: 'Internal error' });
