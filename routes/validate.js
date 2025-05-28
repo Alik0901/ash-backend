@@ -24,7 +24,7 @@ router.post('/', (req, res) => {
 
     const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
     const secret = crypto.createHash('sha256').update(secretPart).digest();
-    const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('base64');
+    const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex'); // <-- HEX!
 
     console.log('\n✅ VALIDATE FINAL 🔐');
     console.log('BOT_TOKEN:', BOT_TOKEN);
