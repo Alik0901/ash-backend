@@ -42,7 +42,7 @@ router.post('/init', async (req, res) => {
     ];
     const { rows: [player] } = await client.query(insertText, insertValues);
 
-    // Инкрементим глобальный счётчик total_users
+    // Инкрементим global_stats.total_users
     await client.query(`
       UPDATE global_stats
          SET value = value + 1
@@ -124,10 +124,11 @@ router.post('/burn', async (req, res) => {
       return res.status(403).json({ error: 'you are cursed' });
     }
 
-    // Проверяем кулдаун 24 часа
-    const now = new Date();
-    const last = player.last_burn ? new Date(player.last_burn) : null;
-    if (last && now - last < 24 * 60 * 60 * 1000) {
+    // Новый кулдаун для отладки: 2 минуты вместо 24 часов
+    const cooldownMs = 2 * 60 * 1000; // 2 минуты
+    const now = Date.now();
+    const last = player.last_burn ? new Date(player.last_burn).getTime() : 0;
+    if (last && (now - last) < cooldownMs) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'burn cooldown active' });
     }
