@@ -1,6 +1,6 @@
 // src/routes/validateFinal.js
 import express from 'express';
-import pool from '../db.js';          // импорт вашего pool из db.js
+import pool from '../db.js';
 
 const router = express.Router();
 
@@ -11,10 +11,10 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    // Получаем запись пользователя по Telegram ID
+    // Теперь из таблицы players, а не users
     const result = await pool.query(
-      `SELECT id, name, created_at
-         FROM users
+      `SELECT tg_id AS id, name, created_at
+         FROM players
         WHERE tg_id = $1
         LIMIT 1`,
       [userId]
@@ -24,7 +24,7 @@ router.post('/', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'User not found' });
     }
 
-    // Проверяем, что сейчас та же самая минута, что и created_at
+    // Проверка «ровно та же минута»
     const created = new Date(user.created_at);
     const now     = new Date();
     const sameMinute =
@@ -37,14 +37,13 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Time window for final phrase has expired' });
     }
 
-    // Формируем ожидаемую фразу
+    // Ожидаемая фраза
     const template = process.env.FINAL_PHRASE_TEMPLATE || 'The Final Shape';
     const expected = `${template} ${user.name}`.trim();
     if (inputPhrase.trim() !== expected) {
       return res.status(400).json({ ok: false, error: 'Incorrect final phrase' });
     }
 
-    // Успешно!
     return res.json({ ok: true });
   } catch (err) {
     console.error('[VALIDATE FINAL ERROR]', err);
