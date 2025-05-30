@@ -4,7 +4,7 @@ import pool from '../db.js';
 
 const router = express.Router();
 
-// Зафиксированные части финальной фразы (кроме имени):
+// Зафиксированные части финальной фразы (кроме имени)
 const PHRASE_PARTS = [
   'the key is time',
   'thirteen',
@@ -13,7 +13,7 @@ const PHRASE_PARTS = [
   'broken chain',
   'hour',
   'mark',
-  'gate',
+  'gate'
 ];
 
 function computeExpectedPhrase(name) {
@@ -26,7 +26,7 @@ router.post('/init', async (req, res) => {
   if (!tg_id) return res.status(400).json({ error: 'tg_id is required' });
 
   try {
-    // если уже есть — возвращаем
+    // если игрок уже есть
     const exists = await pool.query(
       'SELECT * FROM players WHERE tg_id = $1',
       [tg_id]
@@ -35,9 +35,10 @@ router.post('/init', async (req, res) => {
       return res.json(exists.rows[0]);
     }
 
-    // иначе — создаём
+    // иначе создаём нового
     const result = await pool.query(
-      `INSERT INTO players (tg_id, name) VALUES ($1, $2)
+      `INSERT INTO players (tg_id, name)
+       VALUES ($1, $2)
        RETURNING *`,
       [tg_id, name]
     );
@@ -84,7 +85,7 @@ router.get('/fragments/:tg_id', async (req, res) => {
   }
 });
 
-// ▶ POST /api/burn — выдать новый фрагмент (с проверкой кулдауна и curses)
+// ▶ POST /api/burn — выдать новый фрагмент (кулдаун 2 мин, 8 фрагментов)
 router.post('/burn', async (req, res) => {
   const { tg_id } = req.body;
   if (!tg_id) return res.status(400).json({ error: 'tg_id is required' });
@@ -108,7 +109,8 @@ router.post('/burn', async (req, res) => {
       return res.status(403).json({ error: 'burn cooldown active' });
     }
 
-    const allFragments = [1,2,3,4,5,6,7];
+    // 8 фрагментов вместо 7
+    const allFragments = [1, 2, 3, 4, 5, 6, 7, 8];
     const owned = player.fragments || [];
     const available = allFragments.filter(f => !owned.includes(f));
     if (available.length === 0) {
