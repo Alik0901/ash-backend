@@ -6,7 +6,7 @@ import pool from '../db.js';
 const router = express.Router();
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-// helper (по желанию вернуть проверку)
+// helper для проверки initData, можно вернуть в продакшене
 function verifyInitData(initData) {
   const parsed = new URLSearchParams(initData);
   const hash = parsed.get('hash');
@@ -87,6 +87,29 @@ router.get('/player/:tg_id', async (req, res) => {
 });
 
 /**
+ * GET /api/fragments/:tg_id
+ */
+router.get('/fragments/:tg_id', async (req, res) => {
+  const { tg_id } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT fragments
+         FROM players
+        WHERE tg_id = $1
+        LIMIT 1`,
+      [tg_id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'player not found' });
+    }
+    return res.json({ fragments: result.rows[0].fragments });
+  } catch (err) {
+    console.error('[player] GET /api/fragments error:', err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
+
+/**
  * GET /api/stats/total_users
  */
 router.get('/stats/total_users', async (_req, res) => {
@@ -106,6 +129,90 @@ router.get('/stats/total_users', async (_req, res) => {
   }
 });
 
-// остальные routes без изменений…
+/**
+ * POST /api/burn
+ */
+router.post('/burn', async (req, res) => {
+  const { tg_id } = req.body;
+  if (!tg_id) {
+    return res.status(400).json({ ok: false, error: 'tg_id is required' });
+  }
+  try {
+    const playerRes = await pool.query(
+      `SELECT fragments, last_burn, is_cursed
+         FROM players
+        WHERE tg_id = $1
+        LIMIT 1`,
+      [tg_id]
+    );
+    if (playerRes.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'Player not found' });
+    }
+    const { fragments = [], last_burn, is_cursed } = playerRes.rows[0];
+    if (is_cursed) {
+      return res.status(403).json({ ok: false, error: 'You are cursed' });
+    }
+    const now = Date.now();
+    const last = last_burn ? new Date(last_burn).getTime() : 0;
+    if (now - last < 2 * 60 * 1000) {
+      return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
+    }
+    const all = [1,2,3,4,5,6,7,8];
+    const avail = all.filter(f => !fragments.includes(f));
+    if (avail.length === 0) {
+      return res.status(400).json({ ok: false, error: 'All fragments collected' });
+    }
+    const newF = avail[Math.floor(Math.random()*avail.length)];
+    const updated = [...fragments, newF];
+    await pool.query(
+      `UPDATE players
+          SET fragments = $1, last_burn = NOW()
+        WHERE tg_id = $2`,
+      [updated, tg_id]
+    );
+    await pool.query(
+      `UPDATE global_stats
+          SET value = value + 1
+        WHERE id = 'total_users'`
+    );
+    return res.json({ ok: true, newFragment: newF, fragments: updated });
+  } catch (err) {
+    console.error('[player] POST /api/burn error:', err);
+    return res.status(500).json({ ok: false, error: 'internal error' });
+  }
+});
+
+/**
+ * GET /api/final/:tg_id
+ */
+router.get('/final/:tg_id', async (req, res) => {
+  const { tg_id } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT fragments, created_at, name
+         FROM players
+        WHERE tg_id = $1
+        LIMIT 1`,
+      [tg_id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'player not found' });
+    }
+    const { fragments, created_at } = result.rows[0];
+    const createdAt = new Date(created_at);
+    const now = new Date();
+    const canEnter =
+      (fragments || []).length === 8 &&
+      createdAt.getUTCFullYear() === now.getUTCFullYear() &&
+      createdAt.getUTCMonth() === now.getUTCMonth() &&
+      createdAt.getUTCDate() === now.getUTCDate() &&
+      createdAt.getUTCHours() === now.getUTCHours() &&
+      createdAt.getUTCMinutes() === now.getUTCMinutes();
+    return res.json({ canEnter });
+  } catch (err) {
+    console.error('[player] GET /api/final error:', err);
+    return res.status(500).json({ error: 'internal error' });
+  }
+});
 
 export default router;
