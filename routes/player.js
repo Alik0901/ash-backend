@@ -21,12 +21,10 @@ function computeExpectedPhrase(name) {
 }
 
 // ▶ POST /api/init — регистрация или получение игрока
-router.post('/init', async (req, res) => {
+router.post('/api/init', async (req, res) => {
   const { tg_id, name } = req.body;
   if (!tg_id) return res.status(400).json({ error: 'tg_id is required' });
-
   try {
-    // если игрок уже есть
     const exists = await pool.query(
       'SELECT * FROM players WHERE tg_id = $1',
       [tg_id]
@@ -34,8 +32,6 @@ router.post('/init', async (req, res) => {
     if (exists.rows.length > 0) {
       return res.json(exists.rows[0]);
     }
-
-    // иначе создаём нового
     const result = await pool.query(
       `INSERT INTO players (tg_id, name)
        VALUES ($1, $2)
@@ -50,7 +46,7 @@ router.post('/init', async (req, res) => {
 });
 
 // ▶ GET /api/player/:tg_id — получить профиль игрока
-router.get('/player/:tg_id', async (req, res) => {
+router.get('/api/player/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
   try {
     const result = await pool.query(
@@ -68,7 +64,7 @@ router.get('/player/:tg_id', async (req, res) => {
 });
 
 // ▶ GET /api/fragments/:tg_id — получить только массив fragments
-router.get('/fragments/:tg_id', async (req, res) => {
+router.get('/api/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
   try {
     const result = await pool.query(
@@ -85,11 +81,26 @@ router.get('/fragments/:tg_id', async (req, res) => {
   }
 });
 
+// ▶ GET /api/stats/total_users — получить общее число игроков
+router.get('/api/stats/total_users', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT value FROM global_stats WHERE id = 'total_users'"
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'not found' });
+    }
+    res.json({ value: rows[0].value });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 // ▶ POST /api/burn — выдать новый фрагмент (кулдаун 2 мин, 8 фрагментов)
-router.post('/burn', async (req, res) => {
+router.post('/api/burn', async (req, res) => {
   const { tg_id } = req.body;
   if (!tg_id) return res.status(400).json({ error: 'tg_id is required' });
-
   try {
     const playerRes = await pool.query(
       'SELECT * FROM players WHERE tg_id = $1',
@@ -98,7 +109,6 @@ router.post('/burn', async (req, res) => {
     if (playerRes.rows.length === 0) {
       return res.status(404).json({ error: 'player not found' });
     }
-
     const player = playerRes.rows[0];
     if (player.is_cursed) {
       return res.status(403).json({ error: 'you are cursed' });
@@ -108,26 +118,21 @@ router.post('/burn', async (req, res) => {
     if (last && now - last < 2 * 60 * 1000) {
       return res.status(403).json({ error: 'burn cooldown active' });
     }
-
-    // 8 фрагментов вместо 7
-    const allFragments = [1, 2, 3, 4, 5, 6, 7, 8];
+    const allFragments = [1,2,3,4,5,6,7,8];
     const owned = player.fragments || [];
     const available = allFragments.filter(f => !owned.includes(f));
     if (available.length === 0) {
       return res.status(400).json({ message: 'all fragments collected' });
     }
-
     const newFragment = available[Math.floor(Math.random() * available.length)];
     const updated = [...owned, newFragment];
-
     await pool.query(
       'UPDATE players SET fragments = $1, last_burn = NOW() WHERE tg_id = $2',
       [updated, tg_id]
     );
     await pool.query(
-      `UPDATE global_stats SET value = value + 1 WHERE id = 'total_users'`
+      "UPDATE global_stats SET value = value + 1 WHERE id = 'total_users'"
     );
-
     res.json({ message: 'burn success', newFragment, fragments: updated });
   } catch (err) {
     console.error(err);
@@ -136,7 +141,7 @@ router.post('/burn', async (req, res) => {
 });
 
 // ▶ GET /api/final/:tg_id — проверка доступа к финальному экрану
-router.get('/final/:tg_id', async (req, res) => {
+router.get('/api/final/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
   try {
     const result = await pool.query(
@@ -149,7 +154,6 @@ router.get('/final/:tg_id', async (req, res) => {
     const { fragments, created_at } = result.rows[0];
     const createdAt = new Date(created_at);
     const now = new Date();
-
     const canEnter =
       (fragments || []).length === 8 &&
       createdAt.getUTCFullYear() === now.getUTCFullYear() &&
@@ -157,7 +161,6 @@ router.get('/final/:tg_id', async (req, res) => {
       createdAt.getUTCDate() === now.getUTCDate() &&
       createdAt.getUTCHours() === now.getUTCHours() &&
       createdAt.getUTCMinutes() === now.getUTCMinutes();
-
     res.json({ canEnter });
   } catch (err) {
     console.error(err);
@@ -166,12 +169,11 @@ router.get('/final/:tg_id', async (req, res) => {
 });
 
 // ▶ POST /api/final — валидация введённой фразы
-router.post('/final', async (req, res) => {
+router.post('/api/final', async (req, res) => {
   const { tg_id, phrase } = req.body;
   if (!tg_id || !phrase) {
     return res.status(400).json({ error: 'tg_id and phrase are required' });
   }
-
   try {
     const result = await pool.query(
       'SELECT fragments, created_at, name FROM players WHERE tg_id = $1',
@@ -183,18 +185,15 @@ router.post('/final', async (req, res) => {
     const { fragments, created_at, name } = result.rows[0];
     const createdAt = new Date(created_at);
     const now = new Date();
-
     const timeMatch =
       createdAt.getUTCFullYear() === now.getUTCFullYear() &&
       createdAt.getUTCMonth() === now.getUTCMonth() &&
       createdAt.getUTCDate() === now.getUTCDate() &&
       createdAt.getUTCHours() === now.getUTCHours() &&
       createdAt.getUTCMinutes() === now.getUTCMinutes();
-
     if ((fragments || []).length !== 8 || !timeMatch) {
       return res.status(403).json({ error: 'not allowed to enter phrase now' });
     }
-
     const expected = computeExpectedPhrase(name);
     if (phrase.trim().toLowerCase() === expected) {
       return res.json({ valid: true });
