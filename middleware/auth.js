@@ -14,9 +14,9 @@ export function authenticate(req, res, next) {
   }
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload; // { tg_id, name, iat, exp }
+    req.user = payload; // payload: { tg_id, name, iat, exp }
     next();
-  } catch {
+  } catch (err) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }

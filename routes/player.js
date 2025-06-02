@@ -3,12 +3,13 @@ import express from 'express';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import pool from '../db.js';
+import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
-const BOT_TOKEN  = process.env.BOT_TOKEN;
-const JWT_SECRET = process.env.JWT_SECRET;
+const BOT_TOKEN   = process.env.BOT_TOKEN;
+const JWT_SECRET  = process.env.JWT_SECRET;
 
-// Вспомогательная функция для проверки initData (раскомментируйте в проде)
+// helper для проверки initData (раскомментировать в проде)
 function verifyInitData(initData) {
   const parsed = new URLSearchParams(initData);
   const hash = parsed.get('hash');
@@ -23,9 +24,18 @@ function verifyInitData(initData) {
   return hmac === hash;
 }
 
+// helper для генерации JWT
+function generateToken(payload) {
+  return jwt.sign(
+    { tg_id: payload.tg_id, name: payload.name },
+    JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+}
+
 /**
  * POST /api/init
- * Создаёт или возвращает профиль игрока, выдает JWT.
+ * Создаёт (или возвращает) профиль игрока и выдаёт JWT.
  * Ожидает JSON { tg_id, name, initData }
  */
 router.post('/init', async (req, res) => {
@@ -33,65 +43,73 @@ router.post('/init', async (req, res) => {
   if (!tg_id || !initData) {
     return res.status(400).json({ error: 'tg_id and initData are required' });
   }
-  // Проверка подписи (раскомментируйте в проде)
+  // Проверка подписи initData (раскомментировать в проде)
   // if (!verifyInitData(initData)) {
   //   return res.status(403).json({ error: 'Invalid initData signature' });
   // }
 
   try {
-    // Проверяем существование
+    // Сначала пробуем найти существующего игрока
     let result = await pool.query(
-      `SELECT tg_id, name, fragments, created_at 
-         FROM players 
-        WHERE tg_id = $1 
-        LIMIT 1`,
-      [tg_id]
-    );
-
-    let user = result.rows[0];
-    if (!user) {
-      // Вставляем нового игрока
-      result = await pool.query(
-        `INSERT INTO players (tg_id, name)
-         VALUES ($1, $2)
-         RETURNING tg_id, name, fragments, created_at`,
-        [tg_id, name || null]
-      );
-      user = result.rows[0];
-    }
-
-    // Генерируем JWT (1 час жизни)
-    const token = jwt.sign(
-      { tg_id: user.tg_id, name: user.name },
-      JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    return res.json({ user, token });
-  } catch (err) {
-    console.error('[player] POST /api/init error:', err);
-    return res.status(500).json({ error: 'internal error' });
-  }
-});
-
-/**
- * GET /api/player/:tg_id
- * Возвращает профиль игрока. (Protected by JWT middleware)
- */
-router.get('/player/:tg_id', async (req, res) => {
-  const { tg_id } = req.params;
-  try {
-    const result = await pool.query(
-      `SELECT tg_id, name, fragments, created_at
+      `SELECT tg_id, name, fragments, last_burn, is_cursed, created_at
          FROM players
         WHERE tg_id = $1
         LIMIT 1`,
       [tg_id]
     );
-    if (result.rows.length === 0) {
+    let user = result.rows[0];
+    if (!user) {
+      // Если не найден — создаём нового
+      result = await pool.query(
+        `INSERT INTO players (tg_id, name)
+         VALUES ($1, $2)
+         RETURNING tg_id, name, fragments, last_burn, is_cursed, created_at`,
+        [tg_id, name || null]
+      );
+      user = result.rows[0];
+    }
+
+    // Генерируем токен
+    const token = generateToken({ tg_id: user.tg_id, name: user.name });
+    // Отправляем профиль и токен
+    res.json({ user, token });
+  } catch (err) {
+    console.error('[player] POST /api/init error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// Все последующие маршруты — защищённые
+// Подключаем authenticate перед ними:
+router.use(authenticate);
+
+/**
+ * GET /api/player/:tg_id
+ * Возвращает профиль игрока, обновляет JWT в заголовке.
+ */
+router.get('/player/:tg_id', async (req, res) => {
+  const { tg_id } = req.params;
+  // Проверяем, что запрашивает именно авторизованный пользователь
+  if (req.user.tg_id.toString() !== tg_id.toString()) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT tg_id, name, fragments, last_burn, is_cursed, created_at
+         FROM players
+        WHERE tg_id = $1
+        LIMIT 1`,
+      [tg_id]
+    );
+    if (!result.rows.length) {
       return res.status(404).json({ error: 'player not found' });
     }
-    return res.json(result.rows[0]);
+    const user = result.rows[0];
+    // Новый токен
+    const newToken = generateToken({ tg_id: user.tg_id, name: user.name });
+    res.setHeader('Authorization', `Bearer ${newToken}`);
+    return res.json(user);
   } catch (err) {
     console.error('[player] GET /api/player error:', err);
     return res.status(500).json({ error: 'internal error' });
@@ -100,10 +118,14 @@ router.get('/player/:tg_id', async (req, res) => {
 
 /**
  * GET /api/fragments/:tg_id
- * Возвращает список собранных фрагментов.
+ * Возвращает только массив fragments, обновляет JWT.
  */
 router.get('/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
+  if (req.user.tg_id.toString() !== tg_id.toString()) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
   try {
     const result = await pool.query(
       `SELECT fragments
@@ -115,7 +137,10 @@ router.get('/fragments/:tg_id', async (req, res) => {
     if (!result.rows.length) {
       return res.status(404).json({ error: 'player not found' });
     }
-    return res.json({ fragments: result.rows[0].fragments });
+    const fragments = result.rows[0].fragments;
+    const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    res.setHeader('Authorization', `Bearer ${newToken}`);
+    return res.json({ fragments });
   } catch (err) {
     console.error('[player] GET /api/fragments error:', err);
     return res.status(500).json({ error: 'internal error' });
@@ -124,32 +149,39 @@ router.get('/fragments/:tg_id', async (req, res) => {
 
 /**
  * GET /api/stats/total_users
- * Возвращает общее число пользователей.
+ * Возвращает общее число игроков, обновляет JWT.
  */
 router.get('/stats/total_users', async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT value FROM global_stats WHERE id = 'total_users'"
+      `SELECT value FROM global_stats WHERE id = 'total_users'`
     );
     if (!rows.length) {
       return res.status(404).json({ error: 'not found' });
     }
-    return res.json({ value: rows[0].value });
+    const value = rows[0].value;
+    const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    res.setHeader('Authorization', `Bearer ${newToken}`);
+    return res.json({ value });
   } catch (err) {
-    console.error('[player] GET /api/stats error:', err);
+    console.error('[player] GET /api/stats/total_users error:', err);
     return res.status(500).json({ error: 'internal error' });
   }
 });
 
 /**
  * POST /api/burn
- * Добавляет новый фрагмент (куледаун 2 мин).
+ * Добавляет новый фрагмент (2-минутный кулдаун), обновляет JWT.
  */
 router.post('/burn', async (req, res) => {
   const { tg_id } = req.body;
   if (!tg_id) {
     return res.status(400).json({ error: 'tg_id is required' });
   }
+  if (req.user.tg_id.toString() !== tg_id.toString()) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
   try {
     const playerRes = await pool.query(
       `SELECT fragments, last_burn, is_cursed
@@ -163,7 +195,7 @@ router.post('/burn', async (req, res) => {
     }
     const { fragments = [], last_burn, is_cursed } = playerRes.rows[0];
     if (is_cursed) {
-      return res.status(403).json({ error: 'you are cursed' });
+      return res.status(403).json({ error: 'You are cursed' });
     }
     const now = Date.now();
     const last = last_burn ? new Date(last_burn).getTime() : 0;
@@ -173,17 +205,26 @@ router.post('/burn', async (req, res) => {
     const all = [1,2,3,4,5,6,7,8];
     const avail = all.filter(f => !fragments.includes(f));
     if (!avail.length) {
-      return res.status(400).json({ error: 'all fragments collected' });
+      return res.status(400).json({ error: 'All fragments collected' });
     }
     const newF = avail[Math.floor(Math.random()*avail.length)];
     const updated = [...fragments, newF];
+
     await pool.query(
-      `UPDATE players SET fragments=$1, last_burn=NOW() WHERE tg_id=$2`,
+      `UPDATE players
+          SET fragments = $1,
+              last_burn  = NOW()
+        WHERE tg_id = $2`,
       [updated, tg_id]
     );
     await pool.query(
-      `UPDATE global_stats SET value=value+1 WHERE id='total_users'`
+      `UPDATE global_stats
+          SET value = value + 1
+        WHERE id = 'total_users'`
     );
+
+    const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    res.setHeader('Authorization', `Bearer ${newToken}`);
     return res.json({ newFragment: newF, fragments: updated });
   } catch (err) {
     console.error('[player] POST /api/burn error:', err);
@@ -193,13 +234,17 @@ router.post('/burn', async (req, res) => {
 
 /**
  * GET /api/final/:tg_id
- * Проверяет, можно ли вводить финальную фразу.
+ * Проверяет, можно ли вводить финальную фразу прямо сейчас, обновляет JWT.
  */
 router.get('/final/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
+  if (req.user.tg_id.toString() !== tg_id.toString()) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
   try {
     const result = await pool.query(
-      `SELECT fragments, created_at
+      `SELECT fragments, created_at, name
          FROM players
         WHERE tg_id = $1
         LIMIT 1`,
@@ -208,9 +253,9 @@ router.get('/final/:tg_id', async (req, res) => {
     if (!result.rows.length) {
       return res.status(404).json({ error: 'player not found' });
     }
-    const { fragments, created_at } = result.rows[0];
+    const { fragments, created_at, name } = result.rows[0];
     const createdAt = new Date(created_at);
-    const now       = new Date();
+    const now = new Date();
     const canEnter =
       (fragments || []).length === 8 &&
       createdAt.getUTCFullYear() === now.getUTCFullYear() &&
@@ -218,6 +263,9 @@ router.get('/final/:tg_id', async (req, res) => {
       createdAt.getUTCDate()     === now.getUTCDate() &&
       createdAt.getUTCHours()    === now.getUTCHours() &&
       createdAt.getUTCMinutes()  === now.getUTCMinutes();
+
+    const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    res.setHeader('Authorization', `Bearer ${newToken}`);
     return res.json({ canEnter });
   } catch (err) {
     console.error('[player] GET /api/final error:', err);
