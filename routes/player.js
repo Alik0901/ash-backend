@@ -148,24 +148,30 @@ router.get('/fragments/:tg_id', async (req, res) => {
 });
 
 /**
- * GET /api/stats/total_users
- * Возвращает общее число игроков, обновляет JWT.
+ * GET /api/stats/total_users — возвращает общее число игроков
+ * При любой ошибке возвращаем value = 0, но статус 200.
  */
-router.get('/stats/total_users', async (_req, res) => {
+router.get('/stats/total_users', async (req, res) => {
+  // В рамках нашей JWT-логики, сюда уже попал только аутентифицированный пользователь.
   try {
     const { rows } = await pool.query(
-      `SELECT value FROM global_stats WHERE id = 'total_users'`
+      "SELECT value FROM global_stats WHERE id = 'total_users'"
     );
-    if (!rows.length) {
-      return res.status(404).json({ error: 'not found' });
-    }
-    const value = rows[0].value;
+    // Если записи нет, просто возвращаем 0, но не 404/500
+    const total = rows.length > 0 ? rows[0].value : 0;
+
+    // Сгенерируем новый токен (refresh) и отдадим его в заголовке
     const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${newToken}`);
-    return res.json({ value });
+
+    // Возвращаем всегда 200 OK
+    return res.json({ value: total });
   } catch (err) {
     console.error('[player] GET /api/stats/total_users error:', err);
-    return res.status(500).json({ error: 'internal error' });
+    // В случае любой ошибки – возвращаем value:0, но не 500
+    const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    res.setHeader('Authorization', `Bearer ${newToken}`);
+    return res.json({ value: 0 });
   }
 });
 
