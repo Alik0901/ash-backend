@@ -26,13 +26,13 @@ app.use(
   })
 );
 
-// 3. Парсинг JSON с ограничением размера тела
+// 3. Парсинг JSON с ограничением размера
 app.use(express.json({ limit: '10kb' }));
 
-// 4. Rate limiting для эндпоинтов валидации
+// 4. Rate limiting для validate и validate-final
 const validateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 минут
-  max: 30, // максимум 30 запросов за окно
+  windowMs: 15 * 60 * 1000,
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try later.' },
@@ -40,29 +40,21 @@ const validateLimiter = rateLimit({
 app.use('/api/validate', validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-/**
- * 5. Теперь подключаем playerRoutes под /api, но с промежуточным мидлваром:
- *    - Если это GET /api/player/:tg_id — не трогаем authenticate
- *    - Если это POST /api/init         — не трогаем authenticate
- *    - Иначе — пропускаем через authenticate
- */
+// 5. «Прокси» для всех маршрутов /api:
+//    - POST /api/init и GET /api/player/:tg_id — без authenticate
+//    - всё остальное — через authenticate
 app.use('/api', (req, res, next) => {
   const { method, path } = req;
-
-  // 5.1) Если запрос на POST /api/init → без аутентификации
   if (method === 'POST' && path === '/init') {
     return next();
   }
-  // 5.2) Если запрос на GET /api/player/:tg_id (пусть path начинается с '/player/')
-  //      и дальше идёт число (или строка) — тоже без аутентификации
   if (method === 'GET' && path.match(/^\/player\/[^/]+$/)) {
     return next();
   }
-  // Во всех остальных случаях требуем JWT
   return authenticate(req, res, next);
 });
 
-// 6. Подключаем все маршруты из playerRoutes на префикс /api
+// 6. Подключаем playerRoutes на /api
 app.use('/api', playerRoutes);
 
 // 7. Запуск сервера
