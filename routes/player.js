@@ -94,7 +94,7 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// Все последующие маршруты требуют аутентификации
+// Все последующие маршруты — под JWT
 router.use(authenticate);
 
 /**
@@ -148,7 +148,6 @@ router.get('/stats/total_users', async (req, res) => {
 
 /**
  * POST /api/burn-invoice
- * — создаёт счёт на 0.5 TON, сохраняет в БД и отдаёт клиенту ссылку для оплаты.
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -207,7 +206,7 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = invoiceResult.rows[0].invoice_id;
 
-    // Формируем deeplink для оплаты в TON-кошелёк
+    // Deeplink для оплаты в TON-кошелёк
     const amountTON = (amountNano / 1e9).toString();
     const paymentUrl = `ton://transfer/${TON_ADDRESS}?amount=${amountTON}&text=${encodeURIComponent(comment)}`;
 
@@ -216,11 +215,7 @@ router.post('/burn-invoice', async (req, res) => {
     return res.json({
       ok: true,
       invoiceId,
-      tonInvoice: {
-        address: TON_ADDRESS,
-        amountNano,
-        comment
-      },
+      tonInvoice: { address: TON_ADDRESS, amountNano, comment },
       paymentUrl
     });
   } catch (err) {
@@ -230,13 +225,28 @@ router.post('/burn-invoice', async (req, res) => {
 });
 
 /**
- * GET /api/burn-status/:invoiceId?
+ * GET /api/burn-status?invoiceId=…
  */
-router.get('/burn-status/:invoiceId?', async (req, res) => {
-  const invoiceId = req.params.invoiceId || req.query.invoiceId;
+router.get('/burn-status', async (req, res) => {
+  let invoiceId = req.query.invoiceId;
+  // если invoiceId не передали, берём последний созданный для этого пользователя
+  if (!invoiceId || invoiceId === 'null' || invoiceId === 'undefined') {
+    const lastRes = await pool.query(
+      `SELECT invoice_id
+         FROM burn_invoices
+        WHERE tg_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [req.user.tg_id]
+    );
+    if (lastRes.rows.length) {
+      invoiceId = lastRes.rows[0].invoice_id;
+    }
+  }
+
   console.log('[player] GET /api/burn-status, invoiceId:', invoiceId);
 
-  if (!invoiceId || invoiceId === 'null' || invoiceId === 'undefined') {
+  if (!invoiceId) {
     return res.status(400).json({ ok: false, error: 'Invalid or missing invoiceId' });
   }
 
@@ -261,7 +271,7 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
       return res.json({ ok: true, paid: true });
     }
 
-    // TODO: здесь проверить on-chain через ваш TON SDK
+    // TODO: проверить on-chain через TON SDK
     let paid = false;
     if (paid) {
       await pool.query(
@@ -325,16 +335,16 @@ async function runBurnLogic(tgId) {
   }
 
   const allFragments = [1,2,3,4,5,6,7,8];
-  const available = allFragments.filter(f => !fragments.includes(f));
-  const newFragment = available[Math.floor(Math.random() * available.length)];
-  const updatedFragments = [...fragments, newFragment];
+  const available    = allFragments.filter(f => !fragments.includes(f));
+  const newFragment  = available[Math.floor(Math.random() * available.length)];
+  const updated      = [...fragments, newFragment];
 
   await pool.query(
     `UPDATE players
         SET fragments = $1,
             last_burn  = NOW()
       WHERE tg_id = $2`,
-    [updatedFragments, tgId]
+    [updated, tgId]
   );
   await pool.query(
     `UPDATE global_stats
@@ -345,7 +355,7 @@ async function runBurnLogic(tgId) {
   return {
     cursed: false,
     newFragment,
-    fragments: updatedFragments,
+    fragments: updated,
     lastBurn: now.toISOString(),
   };
 }
