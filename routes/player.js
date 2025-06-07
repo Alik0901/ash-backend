@@ -106,7 +106,7 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// Подключение authenticate для всех следующих маршрутов
+// Все последующие маршруты требуют аутентификации
 router.use(authenticate);
 
 /**
@@ -162,7 +162,7 @@ router.get('/stats/total_users', async (req, res) => {
 
 /**
  * POST /api/burn-invoice
- * — генерирует TON-счёт на 0.5 TON и сохраняет в БД → возвращает client-у.
+ * — генерирует счёт (invoice) на 0.5 TON и сохраняет в БД → возвращает client-у.
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -174,7 +174,7 @@ router.post('/burn-invoice', async (req, res) => {
   }
 
   try {
-    // 1) Проверяем состояние игрока
+    // Проверка игрока и его состояния
     const playerRes = await pool.query(
       `SELECT fragments, last_burn, is_cursed, curses_count, curse_expires
          FROM players
@@ -185,10 +185,10 @@ router.post('/burn-invoice', async (req, res) => {
     if (!playerRes.rows.length) {
       return res.status(404).json({ ok: false, error: 'player not found' });
     }
-    const { fragments, last_burn, is_cursed, curses_count, curse_expires } = playerRes.rows[0];
+    const { last_burn, is_cursed, curse_expires } = playerRes.rows[0];
     const now = new Date();
 
-    // 1.1) Если проклятие ещё не истекло
+    // Если проклятие ещё не истекло
     if (curse_expires && new Date(curse_expires) > now) {
       return res.status(403).json({
         ok: false,
@@ -197,7 +197,7 @@ router.post('/burn-invoice', async (req, res) => {
       });
     }
 
-    // 1.2) Снимаем устаревшее проклятие
+    // Сбрасываем устаревшее проклятие
     if (is_cursed && curse_expires && new Date(curse_expires) <= now) {
       await pool.query(
         `UPDATE players
@@ -208,16 +208,15 @@ router.post('/burn-invoice', async (req, res) => {
       );
     }
 
-    // 1.3) Проверка кулдауна (2 минуты)
+    // Проверка двухминутного кулдауна
     const lastBurnTime = last_burn ? new Date(last_burn).getTime() : 0;
     if (now.getTime() - lastBurnTime < 2 * 60 * 1000) {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // 2) Создаём запись в burn_invoices
-    const amountNano = 0.5 * 1e9;                // 0.5 TON в нанотоннах
-    const comment    = 'burn-' + Date.now().toString();
-
+    // Создаём запись в burn_invoices
+    const amountNano = 500_000_000; // 0.5 TON в нанотоннах
+    const comment    = 'burn-' + Date.now(); 
     const invoiceResult = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
        VALUES ($1, $2, $3, $4)
@@ -226,7 +225,7 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = invoiceResult.rows[0].invoice_id;
 
-    // 3) Возвращаем TON-счёт клиенту
+    // Ответ клиенту
     const tonInvoice = { address: TON_ADDRESS, amountNano, comment };
     const newToken  = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${newToken}`);
@@ -238,20 +237,19 @@ router.post('/burn-invoice', async (req, res) => {
 });
 
 /**
- * GET /api/burn-status/:invoiceId
- * — проверяет on-chain, оплачен ли счёт. Если да → runBurnLogic → выдача награды.
+ * GET /api/burn-status/:invoiceId?
+ * — проверяет on-chain, оплачен ли счёт. Если да → runBurnLogic и выдаёт игроку награду.
+ * Принимаем invoiceId либо в path, либо в query (?invoiceId=...)
  */
-router.get('/burn-status/:invoiceId', async (req, res) => {
-  const { invoiceId } = req.params;
-
-  // логируем и валидируем параметр до запроса в БД
+router.get('/burn-status/:invoiceId?', async (req, res) => {
+  const invoiceId = req.params.invoiceId || req.query.invoiceId;
   console.log('[player] GET /api/burn-status, invoiceId:', invoiceId);
-  if (!invoiceId || invoiceId === 'null') {
-    return res.status(400).json({ ok: false, error: 'Invalid invoiceId' });
+
+  if (!invoiceId || invoiceId === 'null' || invoiceId === 'undefined') {
+    return res.status(400).json({ ok: false, error: 'Invalid or missing invoiceId' });
   }
 
   try {
-    // 1) Получаем запись из burn_invoices
     const invRes = await pool.query(
       `SELECT tg_id, amount_nano, address, comment, status, created_at
          FROM burn_invoices
@@ -264,22 +262,18 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
     }
     const invoice = invRes.rows[0];
 
-    // 2) Проверяем владельца
     if (invoice.tg_id.toString() !== req.user.tg_id.toString()) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
 
-    // 3) Если уже оплачен — возвращаем сразу
     if (invoice.status === 'paid') {
       return res.json({ ok: true, paid: true });
     }
 
-    // 4) Проверяем on-chain через ваш TON-SDK (псевдокод)
+    // TODO: реализовать проверку on-chain через ваш TON SDK
     let paid = false;
-    // … ваша реализация здесь …
-
+    // если paid === true:
     if (paid) {
-      // 5.1) Отмечаем в БД как paid
       await pool.query(
         `UPDATE burn_invoices
             SET status = 'paid',
@@ -287,14 +281,11 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
           WHERE invoice_id = $1`,
         [invoiceId]
       );
-
-      // 5.2) Выдаём фрагмент или проклятие
       const burnResult = await runBurnLogic(req.user.tg_id);
       const newToken   = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
       res.setHeader('Authorization', `Bearer ${newToken}`);
       return res.json({ ok: true, paid: true, ...burnResult });
     } else {
-      // 6) Пока не оплачен
       const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
       res.setHeader('Authorization', `Bearer ${newToken}`);
       return res.json({ ok: true, paid: false });
@@ -307,10 +298,9 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
 
 /**
  * Вспомогательная функция runBurnLogic(tgId):
- * — выдаёт фрагмент или проклятие, сохраняет в БД и возвращает результат.
+ * — выдаёт фрагмент или проклятие по бизнес-логике, сохраняет в БД и возвращает результат.
  */
 async function runBurnLogic(tgId) {
-  // 1) Забираем данные игрока
   const playerRes = await pool.query(
     `SELECT fragments, is_cursed, curses_count
        FROM players
@@ -321,22 +311,14 @@ async function runBurnLogic(tgId) {
   const { fragments = [], is_cursed, curses_count } = playerRes.rows[0];
   const now = new Date();
 
-  // 2) Если игрок всё ещё под проклятием
   if (is_cursed) {
     return { cursed: true, curse_expires: is_cursed };
   }
 
-  // 3) Считаем предыдущие «сжигания»
   const totalBurnsDone = fragments.length + curses_count;
-
-  // 4) Решаем, проклятье или фрагмент
   let giveCurse = false;
-  if (totalBurnsDone < 3) {
-    giveCurse = false;
-  } else if (curses_count < 6) {
+  if (totalBurnsDone >= 3 && curses_count < 6) {
     giveCurse = Math.random() < 0.5;
-  } else {
-    giveCurse = false;
   }
 
   if (giveCurse) {
@@ -353,12 +335,10 @@ async function runBurnLogic(tgId) {
     return { cursed: true, curse_expires: expireTs.toISOString() };
   }
 
-  // 5) Выдаём новый фрагмент
-  const allFragments     = [1,2,3,4,5,6,7,8];
-  const owned            = fragments;
-  const available        = allFragments.filter(f => !owned.includes(f));
-  const newFragment      = available[Math.floor(Math.random() * available.length)];
-  const updatedFragments = [...owned, newFragment];
+  const allFragments = [1,2,3,4,5,6,7,8];
+  const available = allFragments.filter(f => !fragments.includes(f));
+  const newFragment = available[Math.floor(Math.random() * available.length)];
+  const updatedFragments = [...fragments, newFragment];
 
   await pool.query(
     `UPDATE players
@@ -377,7 +357,7 @@ async function runBurnLogic(tgId) {
     cursed: false,
     newFragment,
     fragments: updatedFragments,
-    lastBurn: now.toISOString()
+    lastBurn: now.toISOString(),
   };
 }
 
