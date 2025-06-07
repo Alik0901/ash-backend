@@ -39,7 +39,6 @@ function verifyInitData(initData) {
 
 /**
  * GET /api/player/:tg_id
- * — публичный, без аутентификации. Возвращает профиль игрока или 404.
  */
 router.get('/player/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -63,20 +62,13 @@ router.get('/player/:tg_id', async (req, res) => {
 
 /**
  * POST /api/init
- * — публичный. Создаёт или возвращает существующего игрока + выдаёт JWT.
  */
 router.post('/init', async (req, res) => {
   const { tg_id, name, initData } = req.body;
   if (!tg_id || !initData) {
     return res.status(400).json({ error: 'tg_id and initData are required' });
   }
-  // (По желанию) проверяем подпись initData:
-  // if (!verifyInitData(initData)) {
-  //   return res.status(403).json({ error: 'Invalid initData signature' });
-  // }
-
   try {
-    // Проверяем, есть ли уже игрок
     let result = await pool.query(
       `SELECT tg_id, name, fragments, last_burn, is_cursed, curses_count, curse_expires, created_at
          FROM players
@@ -85,9 +77,7 @@ router.post('/init', async (req, res) => {
       [tg_id]
     );
     let userRow = result.rows[0];
-
     if (!userRow) {
-      // Если нет — создаём нового с name
       result = await pool.query(
         `INSERT INTO players (tg_id, name, is_cursed, curses_count, curse_expires)
          VALUES ($1, $2, FALSE, 0, NULL)
@@ -96,8 +86,6 @@ router.post('/init', async (req, res) => {
       );
       userRow = result.rows[0];
     }
-
-    // Генерируем JWT
     const token = generateToken({ tg_id: userRow.tg_id, name: userRow.name });
     return res.json({ user: userRow, token });
   } catch (err) {
@@ -111,7 +99,6 @@ router.use(authenticate);
 
 /**
  * GET /api/fragments/:tg_id
- * — возвращает fragments[] игрока + обновлённый JWT.
  */
 router.get('/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -141,7 +128,6 @@ router.get('/fragments/:tg_id', async (req, res) => {
 
 /**
  * GET /api/stats/total_users
- * — возвращает общее количество игроков + обновлённый JWT.
  */
 router.get('/stats/total_users', async (req, res) => {
   try {
@@ -162,7 +148,7 @@ router.get('/stats/total_users', async (req, res) => {
 
 /**
  * POST /api/burn-invoice
- * — генерирует счёт (invoice) на 0.5 TON и сохраняет в БД → возвращает client-у.
+ * — создаёт счёт на 0.5 TON, сохраняет в БД и отдаёт клиенту ссылку для оплаты.
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -174,9 +160,8 @@ router.post('/burn-invoice', async (req, res) => {
   }
 
   try {
-    // Проверка игрока и его состояния
     const playerRes = await pool.query(
-      `SELECT fragments, last_burn, is_cursed, curses_count, curse_expires
+      `SELECT last_burn, is_cursed, curse_expires
          FROM players
         WHERE tg_id = $1
         LIMIT 1`,
@@ -188,7 +173,6 @@ router.post('/burn-invoice', async (req, res) => {
     const { last_burn, is_cursed, curse_expires } = playerRes.rows[0];
     const now = new Date();
 
-    // Если проклятие ещё не истекло
     if (curse_expires && new Date(curse_expires) > now) {
       return res.status(403).json({
         ok: false,
@@ -197,7 +181,6 @@ router.post('/burn-invoice', async (req, res) => {
       });
     }
 
-    // Сбрасываем устаревшее проклятие
     if (is_cursed && curse_expires && new Date(curse_expires) <= now) {
       await pool.query(
         `UPDATE players
@@ -208,15 +191,14 @@ router.post('/burn-invoice', async (req, res) => {
       );
     }
 
-    // Проверка двухминутного кулдауна
     const lastBurnTime = last_burn ? new Date(last_burn).getTime() : 0;
     if (now.getTime() - lastBurnTime < 2 * 60 * 1000) {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // Создаём запись в burn_invoices
-    const amountNano = 500_000_000; // 0.5 TON в нанотоннах
-    const comment    = 'burn-' + Date.now(); 
+    // Создаём инвойс
+    const amountNano = 500_000_000; // 0.5 TON
+    const comment    = 'burn-' + Date.now();
     const invoiceResult = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
        VALUES ($1, $2, $3, $4)
@@ -225,11 +207,22 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = invoiceResult.rows[0].invoice_id;
 
-    // Ответ клиенту
-    const tonInvoice = { address: TON_ADDRESS, amountNano, comment };
-    const newToken  = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    // Формируем deeplink для оплаты в TON-кошелёк
+    const amountTON = (amountNano / 1e9).toString();
+    const paymentUrl = `ton://transfer/${TON_ADDRESS}?amount=${amountTON}&text=${encodeURIComponent(comment)}`;
+
+    const newToken = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${newToken}`);
-    return res.json({ ok: true, invoiceId, tonInvoice });
+    return res.json({
+      ok: true,
+      invoiceId,
+      tonInvoice: {
+        address: TON_ADDRESS,
+        amountNano,
+        comment
+      },
+      paymentUrl
+    });
   } catch (err) {
     console.error('[player] POST /api/burn-invoice error:', err);
     return res.status(500).json({ ok: false, error: 'internal error' });
@@ -238,8 +231,6 @@ router.post('/burn-invoice', async (req, res) => {
 
 /**
  * GET /api/burn-status/:invoiceId?
- * — проверяет on-chain, оплачен ли счёт. Если да → runBurnLogic и выдаёт игроку награду.
- * Принимаем invoiceId либо в path, либо в query (?invoiceId=...)
  */
 router.get('/burn-status/:invoiceId?', async (req, res) => {
   const invoiceId = req.params.invoiceId || req.query.invoiceId;
@@ -270,9 +261,8 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
       return res.json({ ok: true, paid: true });
     }
 
-    // TODO: реализовать проверку on-chain через ваш TON SDK
+    // TODO: здесь проверить on-chain через ваш TON SDK
     let paid = false;
-    // если paid === true:
     if (paid) {
       await pool.query(
         `UPDATE burn_invoices
@@ -297,8 +287,7 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
 });
 
 /**
- * Вспомогательная функция runBurnLogic(tgId):
- * — выдаёт фрагмент или проклятие по бизнес-логике, сохраняет в БД и возвращает результат.
+ * Вспомогательная функция runBurnLogic
  */
 async function runBurnLogic(tgId) {
   const playerRes = await pool.query(
