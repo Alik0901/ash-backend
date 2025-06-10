@@ -1,17 +1,13 @@
 import express from 'express';
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import pool from '../db.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
-const BOT_TOKEN  = process.env.BOT_TOKEN;
 const JWT_SECRET = process.env.JWT_SECRET;
-
-// TON-конфигурация
 const TON_ADDRESS = process.env.TON_WALLET_ADDRESS;
 
-// Генерация JWT
+// Генерация нового JWT
 function generateToken(payload) {
   return jwt.sign(
     { tg_id: payload.tg_id, name: payload.name },
@@ -36,7 +32,7 @@ router.get('/player/:tg_id', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'player not found' });
     res.json(rows[0]);
   } catch (err) {
-    console.error('[player] GET /api/player error:', err);
+    console.error(err);
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -51,31 +47,27 @@ router.post('/init', async (req, res) => {
   }
   try {
     let { rows } = await pool.query(
-      `SELECT tg_id, name, fragments, last_burn, is_cursed, curses_count, curse_expires, created_at
-         FROM players
-        WHERE tg_id = $1
-        LIMIT 1`,
+      `SELECT * FROM players WHERE tg_id = $1 LIMIT 1`,
       [tg_id]
     );
-    let user = rows[0];
-    if (!user) {
+    if (!rows.length) {
       ({ rows } = await pool.query(
         `INSERT INTO players (tg_id, name, is_cursed, curses_count, curse_expires)
          VALUES ($1, $2, FALSE, 0, NULL)
-         RETURNING tg_id, name, fragments, last_burn, is_cursed, curses_count, curse_expires, created_at`,
+         RETURNING *`,
         [tg_id, name || null]
       ));
-      user = rows[0];
     }
+    const user = rows[0];
     const token = generateToken({ tg_id: user.tg_id, name: user.name });
     res.json({ user, token });
   } catch (err) {
-    console.error('[player] POST /api/init error:', err);
+    console.error(err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-// далее — все роуты под JWT
+// Всё, что ниже — под JWT
 router.use(authenticate);
 
 /**
@@ -97,7 +89,7 @@ router.get('/fragments/:tg_id', async (req, res) => {
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ fragments });
   } catch (err) {
-    console.error('[player] GET /api/fragments error:', err);
+    console.error(err);
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -115,7 +107,7 @@ router.get('/stats/total_users', async (req, res) => {
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ value: total });
   } catch (err) {
-    console.error('[player] GET /api/stats/total_users error:', err);
+    console.error(err);
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ value: 0 });
@@ -124,17 +116,17 @@ router.get('/stats/total_users', async (req, res) => {
 
 /**
  * POST /api/burn-invoice
- * — создаёт счёт на 0.5 TON и возвращает JSON с веб-deeplink’ом через Tonhub
+ * — создаёт счёт на 0.5 TON (500 000 000 нанотонн) и возвращает JSON с веб-deeplink’ом.
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
-  if (!tg_id) return res.status(400).json({ ok: false, error: 'tg_id is required' });
+  if (!tg_id) return res.status(400).json({ ok: false, error: 'tg_id required' });
   if (req.user.tg_id.toString() !== tg_id.toString()) {
     return res.status(403).json({ ok: false, error: 'Forbidden' });
   }
 
   try {
-    // проверки кулдауна и проклятия (как у вас)
+    // Проверки кулдауна / проклятия (ваша логика)
     const { rows: pr } = await pool.query(
       `SELECT last_burn, is_cursed, curse_expires FROM players WHERE tg_id = $1 LIMIT 1`,
       [tg_id]
@@ -151,13 +143,13 @@ router.post('/burn-invoice', async (req, res) => {
         [tg_id]
       );
     }
-    const lastTime = last_burn ? new Date(last_burn).getTime() : 0;
-    if (now.getTime() - lastTime < 2 * 60 * 1000) {
+    const lastMs = last_burn ? new Date(last_burn).getTime() : 0;
+    if (now.getTime() - lastMs < 2 * 60 * 1000) {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // вставляем инвойс
-    const amountNano = 500_000_000;            // 0.5 TON
+    // Вставляем новый invoice
+    const amountNano = 500_000_000; // целое
     const comment    = 'burn-' + Date.now();
     const { rows: ir } = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
@@ -167,18 +159,12 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = ir[0].invoice_id;
 
-    // веб-deeplink через Tonhub
-    const amountTon  = (amountNano / 1e9).toString();
-    const paymentUrl = `https://tonhub.com/transfer/${TON_ADDRESS}?amount=${amountTon}&text=${encodeURIComponent(comment)}`;
+    // Веб-deeplink через Tonhub: передаём целое количество nano
+    const paymentUrl = `https://tonhub.com/transfer/${TON_ADDRESS}?amount=${amountNano}`;
 
-    // возвращаем JSON
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
-    return res.json({
-      ok: true,
-      invoiceId,
-      paymentUrl
-    });
+    return res.json({ ok: true, invoiceId, paymentUrl });
   } catch (err) {
     console.error('[player] POST /api/burn-invoice error:', err);
     return res.status(500).json({ ok: false, error: 'internal error' });
@@ -192,23 +178,24 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
   let invoiceId = req.params.invoiceId || req.query.invoiceId;
   if (!invoiceId || invoiceId === 'null') {
     const { rows } = await pool.query(
-      `SELECT invoice_id FROM burn_invoices
-         WHERE tg_id = $1
-         ORDER BY created_at DESC
-         LIMIT 1`,
+      `SELECT invoice_id
+         FROM burn_invoices
+        WHERE tg_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
       [req.user.tg_id]
     );
     invoiceId = rows[0]?.invoice_id;
   }
   if (!invoiceId) {
-    return res.status(400).json({ ok: false, error: 'Invalid or missing invoiceId' });
+    return res.status(400).json({ ok: false, error: 'invoiceId missing' });
   }
   try {
     const { rows } = await pool.query(
       `SELECT tg_id, status FROM burn_invoices WHERE invoice_id = $1 LIMIT 1`,
       [invoiceId]
     );
-    if (!rows.length) return res.status(404).json({ ok: false, error: 'invoice not found' });
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'not found' });
     if (rows[0].tg_id.toString() !== req.user.tg_id.toString()) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
@@ -223,7 +210,7 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
   }
 });
 
-// Ваша runBurnLogic без изменений
+// runBurnLogic остаётся без изменений
 async function runBurnLogic(tgId) {
   /* ... */
 }
