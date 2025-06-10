@@ -63,7 +63,7 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// JWT-защищённые роуты дальше
+// JWT для всех следующих
 router.use(authenticate);
 
 /** GET /api/fragments/:tg_id */
@@ -109,26 +109,37 @@ router.get('/stats/total_users', async (req, res) => {
 /** POST /api/burn-invoice */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
-  if (!tg_id) return res.status(400).json({ ok: false, error: 'tg_id is required' });
+  if (!tg_id) {
+    return res.status(400).json({ ok: false, error: 'tg_id is required' });
+  }
   if (req.user.tg_id.toString() !== tg_id.toString()) {
     return res.status(403).json({ ok: false, error: 'Forbidden' });
   }
 
   try {
-    // проверяем кулдаун/проклятие
+    // Проверка кулдауна/проклятия
     const { rows: pr } = await pool.query(
-      `SELECT last_burn, is_cursed, curse_expires FROM players WHERE tg_id = $1`,
+      `SELECT last_burn, is_cursed, curse_expires
+         FROM players
+        WHERE tg_id = $1`,
       [tg_id]
     );
-    if (!pr.length) return res.status(404).json({ ok: false, error: 'player not found' });
+    if (!pr.length) {
+      return res.status(404).json({ ok: false, error: 'player not found' });
+    }
     const { last_burn, is_cursed, curse_expires } = pr[0];
     const now = new Date();
     if (curse_expires && new Date(curse_expires) > now) {
-      return res.status(403).json({ ok: false, error: 'You are still cursed', curse_expires });
+      return res
+        .status(403)
+        .json({ ok: false, error: 'You are still cursed', curse_expires });
     }
     if (is_cursed && curse_expires && new Date(curse_expires) <= now) {
       await pool.query(
-        `UPDATE players SET is_cursed = FALSE, curse_expires = NULL WHERE tg_id = $1`,
+        `UPDATE players
+            SET is_cursed = FALSE,
+                curse_expires = NULL
+          WHERE tg_id = $1`,
         [tg_id]
       );
     }
@@ -137,17 +148,18 @@ router.post('/burn-invoice', async (req, res) => {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // создаём инвойс
-    const amountNano = 500_000_000; // целое число
+    // Создание инвойса
+    const amountNano = 500_000_000;                    // <<< целое
     const comment    = 'burn-' + Date.now();
     const { rows: ir } = await pool.query(
       `INSERT INTO burn_invoices (tg_id,amount_nano,address,comment)
-       VALUES ($1,$2,$3,$4) RETURNING invoice_id`,
+       VALUES ($1,$2,$3,$4)
+       RETURNING invoice_id`,
       [tg_id, amountNano, TON_ADDRESS, comment]
     );
     const invoiceId = ir[0].invoice_id;
 
-    // веб-deeplink
+    // Deeplink на Tonhub (nanoton)
     const paymentUrl = `https://tonhub.com/transfer/${TON_ADDRESS}?amount=${amountNano}`;
 
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
@@ -164,8 +176,11 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
   let invoiceId = req.params.invoiceId || req.query.invoiceId;
   if (!invoiceId || invoiceId === 'null') {
     const { rows } = await pool.query(
-      `SELECT invoice_id FROM burn_invoices
-         WHERE tg_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      `SELECT invoice_id
+         FROM burn_invoices
+        WHERE tg_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
       [req.user.tg_id]
     );
     invoiceId = rows[0]?.invoice_id;
@@ -175,24 +190,29 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
   }
   try {
     const { rows } = await pool.query(
-      `SELECT tg_id,status FROM burn_invoices WHERE invoice_id = $1`,
+      `SELECT tg_id,status
+         FROM burn_invoices
+        WHERE invoice_id = $1`,
       [invoiceId]
     );
-    if (!rows.length) return res.status(404).json({ ok: false, error: 'invoice not found' });
+    if (!rows.length) {
+      return res.status(404).json({ ok: false, error: 'invoice not found' });
+    }
     if (rows[0].tg_id.toString() !== req.user.tg_id.toString()) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
     if (rows[0].status === 'paid') {
       return res.json({ ok: true, paid: true });
     }
-    return res.json({ ok: true, paid: false });
+    // TODO: on-chain проверка
+    res.json({ ok: true, paid: false });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
-// бизнес-логика выдачи фрагмента/проклятия
+// Бизнес-логика выдачи фрагмента/проклятия
 async function runBurnLogic(tgId) {
   /* ... */
 }
