@@ -10,7 +10,6 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 // TON-конфигурация
 const TON_ADDRESS = process.env.TON_WALLET_ADDRESS;
-const TON_RPC     = process.env.TON_RPC_ENDPOINT;
 
 // Генерация JWT
 function generateToken(payload) {
@@ -19,21 +18,6 @@ function generateToken(payload) {
     JWT_SECRET,
     { expiresIn: '1h' }
   );
-}
-
-// (Опционально) Проверка подписи initData
-function verifyInitData(initData) {
-  const parsed = new URLSearchParams(initData);
-  const hash = parsed.get('hash');
-  parsed.delete('hash');
-  const dataCheckString = [...parsed.entries()]
-    .map(([k, v]) => `${k}=${v}`)
-    .sort()
-    .join('\n');
-  const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
-  const secret = crypto.createHash('sha256').update(secretPart).digest();
-  const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
-  return hmac === hash;
 }
 
 /**
@@ -91,7 +75,7 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// Дальше все маршруты защищены JWT
+// далее — все роуты под JWT
 router.use(authenticate);
 
 /**
@@ -140,7 +124,7 @@ router.get('/stats/total_users', async (req, res) => {
 
 /**
  * POST /api/burn-invoice
- * — создаёт счёт (invoice) на 0.5 TON, сохраняет в БД и возвращает JSON с deeplink’ом.
+ * — создаёт счёт на 0.5 TON и возвращает JSON с веб-deeplink’ом через Tonhub
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -150,7 +134,7 @@ router.post('/burn-invoice', async (req, res) => {
   }
 
   try {
-    // Проверка кулдауна и проклятия (как в вашем коде)
+    // проверки кулдауна и проклятия (как у вас)
     const { rows: pr } = await pool.query(
       `SELECT last_burn, is_cursed, curse_expires FROM players WHERE tg_id = $1 LIMIT 1`,
       [tg_id]
@@ -158,13 +142,8 @@ router.post('/burn-invoice', async (req, res) => {
     if (!pr.length) return res.status(404).json({ ok: false, error: 'player not found' });
     const { last_burn, is_cursed, curse_expires } = pr[0];
     const now = new Date();
-
     if (curse_expires && new Date(curse_expires) > now) {
-      return res.status(403).json({
-        ok: false,
-        error: 'You are still cursed',
-        curse_expires
-      });
+      return res.status(403).json({ ok: false, error: 'You are still cursed', curse_expires });
     }
     if (is_cursed && curse_expires && new Date(curse_expires) <= now) {
       await pool.query(
@@ -177,8 +156,8 @@ router.post('/burn-invoice', async (req, res) => {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // Генерация счёта
-    const amountNano = 500_000_000; // 0.5 TON
+    // вставляем инвойс
+    const amountNano = 500_000_000;            // 0.5 TON
     const comment    = 'burn-' + Date.now();
     const { rows: ir } = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
@@ -188,17 +167,16 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = ir[0].invoice_id;
 
-    // Deeplink
-    const amountTON  = (amountNano / 1e9).toString();
-    const paymentUrl = `ton://transfer/${TON_ADDRESS}?amount=${amountTON}&text=${encodeURIComponent(comment)}`;
+    // веб-deeplink через Tonhub
+    const amountTon  = (amountNano / 1e9).toString();
+    const paymentUrl = `https://tonhub.com/transfer/${TON_ADDRESS}?amount=${amountTon}&text=${encodeURIComponent(comment)}`;
 
-    // Возвращаем JSON, а не редирект
+    // возвращаем JSON
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
     return res.json({
       ok: true,
       invoiceId,
-      tonInvoice: { address: TON_ADDRESS, amountNano, comment },
       paymentUrl
     });
   } catch (err) {
@@ -222,25 +200,22 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
     );
     invoiceId = rows[0]?.invoice_id;
   }
-  console.log('[player] GET /api/burn-status, invoiceId:', invoiceId);
   if (!invoiceId) {
     return res.status(400).json({ ok: false, error: 'Invalid or missing invoiceId' });
   }
-
   try {
     const { rows } = await pool.query(
       `SELECT tg_id, status FROM burn_invoices WHERE invoice_id = $1 LIMIT 1`,
       [invoiceId]
     );
     if (!rows.length) return res.status(404).json({ ok: false, error: 'invoice not found' });
-    const inv = rows[0];
-    if (inv.tg_id.toString() !== req.user.tg_id.toString()) {
+    if (rows[0].tg_id.toString() !== req.user.tg_id.toString()) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
-    if (inv.status === 'paid') {
+    if (rows[0].status === 'paid') {
       return res.json({ ok: true, paid: true });
     }
-    // TODO: проверка on-chain…
+    // TODO: проверка on-chain
     return res.json({ ok: true, paid: false });
   } catch (err) {
     console.error('[player] GET /api/burn-status error:', err);
@@ -248,7 +223,7 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
   }
 });
 
-// Бизнес-логика runBurnLogic() без изменений
+// Ваша runBurnLogic без изменений
 async function runBurnLogic(tgId) {
   /* ... */
 }
