@@ -18,7 +18,7 @@ function generateToken(payload) {
 
 /**
  * GET /api/player/:tg_id
- * — публично возвращает профиль игрока
+ * — публичный, возвращает профиль игрока
  */
 router.get('/player/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -40,7 +40,7 @@ router.get('/player/:tg_id', async (req, res) => {
 
 /**
  * POST /api/init
- * — создаёт или возвращает игрока + JWT
+ * — публичный, создаёт или возвращает игрока + JWT
  */
 router.post('/init', async (req, res) => {
   const { tg_id, name, initData } = req.body;
@@ -69,12 +69,12 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// Все следующие роуты защищены JWT
+// Все последующие маршруты через JWT:
 router.use(authenticate);
 
 /**
  * GET /api/fragments/:tg_id
- * — возвращает fragments игрока + новый JWT
+ * — возвращает fragments[] + обновлённый JWT
  */
 router.get('/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -99,7 +99,7 @@ router.get('/fragments/:tg_id', async (req, res) => {
 
 /**
  * GET /api/stats/total_users
- * — возвращает общее число пользователей + новый JWT
+ * — возвращает общее число игроков + обновлённый JWT
  */
 router.get('/stats/total_users', async (req, res) => {
   try {
@@ -120,20 +120,25 @@ router.get('/stats/total_users', async (req, res) => {
 
 /**
  * POST /api/burn-invoice
- * — создаёт счёт на 0.5 TON (500_000_000 нанотонн) и возвращает JSON:
- *   { ok, invoiceId, paymentUrl }
+ * — создаёт счёт на 0.5 TON (500_000_000 нанотонн) и возвращает:
+ *    { ok, invoiceId, paymentUrl }
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
-  if (!tg_id) return res.status(400).json({ ok: false, error: 'tg_id is required' });
+  if (!tg_id) {
+    return res.status(400).json({ ok: false, error: 'tg_id is required' });
+  }
   if (req.user.tg_id.toString() !== tg_id.toString()) {
     return res.status(403).json({ ok: false, error: 'Forbidden' });
   }
 
   try {
-    // 1) Проверяем кулдаун и проклятие
+    // Проверка проклятия и кулдауна
     const { rows: pr } = await pool.query(
-      `SELECT last_burn, is_cursed, curse_expires FROM players WHERE tg_id = $1 LIMIT 1`,
+      `SELECT last_burn, is_cursed, curse_expires
+         FROM players
+        WHERE tg_id = $1
+        LIMIT 1`,
       [tg_id]
     );
     if (!pr.length) {
@@ -146,7 +151,10 @@ router.post('/burn-invoice', async (req, res) => {
     }
     if (is_cursed && curse_expires && new Date(curse_expires) <= now) {
       await pool.query(
-        `UPDATE players SET is_cursed = FALSE, curse_expires = NULL WHERE tg_id = $1`,
+        `UPDATE players
+            SET is_cursed = FALSE,
+                curse_expires = NULL
+          WHERE tg_id = $1`,
         [tg_id]
       );
     }
@@ -155,8 +163,8 @@ router.post('/burn-invoice', async (req, res) => {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // 2) Вставляем новый invoice
-    const amountNano = 500_000_000;           // 0.5 TON
+    // Вставляем инвойс
+    const amountNano = 500_000_000; // 0.5 TON
     const comment    = 'burn-' + Date.now();
     const { rows: ir } = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
@@ -166,22 +174,22 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = ir[0].invoice_id;
 
-    // 3) Веб-deeplink через Tonhub (целое число nanoton)
+    // Веб-deeplink (целое nanoton)
     const paymentUrl = `https://tonhub.com/transfer/${TON_ADDRESS}?amount=${amountNano}`;
 
-    // 4) Отдаём JSON + новый JWT
+    // Отдаём JSON + JWT
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
-    return res.json({ ok: true, invoiceId, paymentUrl });
+    res.json({ ok: true, invoiceId, paymentUrl });
   } catch (err) {
     console.error('[player] POST /api/burn-invoice error:', err);
-    return res.status(500).json({ ok: false, error: 'internal error' });
+    res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
 /**
  * GET /api/burn-status/:invoiceId?
- * — проверяет статус инвойса; если invoiceId пропущен, берёт последний
+ * — проверяет статус; если invoiceId не передан, берёт самый свежий
  */
 router.get('/burn-status/:invoiceId?', async (req, res) => {
   let invoiceId = req.params.invoiceId || req.query.invoiceId;
@@ -211,18 +219,17 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
     if (!rows.length) {
       return res.status(404).json({ ok: false, error: 'invoice not found' });
     }
-    const inv = rows[0];
-    if (inv.tg_id.toString() !== req.user.tg_id.toString()) {
+    if (rows[0].tg_id.toString() !== req.user.tg_id.toString()) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
-    if (inv.status === 'paid') {
+    if (rows[0].status === 'paid') {
       return res.json({ ok: true, paid: true });
     }
-    // TODO: проверка on-chain
-    return res.json({ ok: true, paid: false });
+    // TODO: on-chain проверка
+    res.json({ ok: true, paid: false });
   } catch (err) {
     console.error('[player] GET /api/burn-status error:', err);
-    return res.status(500).json({ ok: false, error: 'internal error' });
+    res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
@@ -250,16 +257,16 @@ async function runBurnLogic(tgId) {
 
   if (giveCurse) {
     const newCount = curses_count + 1;
-    const expTs = new Date(now.getTime() + 24*60*60*1000);
+    const expireTs = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     await pool.query(
       `UPDATE players
           SET is_cursed = TRUE,
               curses_count = $1,
               curse_expires = $2
         WHERE tg_id = $3`,
-      [newCount, expTs.toISOString(), tgId]
+      [newCount, expireTs.toISOString(), tgId]
     );
-    return { cursed: true, curse_expires: expTs.toISOString() };
+    return { cursed: true, curse_expires: expireTs.toISOString() };
   }
 
   const all = [1,2,3,4,5,6,7,8];
@@ -270,7 +277,8 @@ async function runBurnLogic(tgId) {
 
   await pool.query(
     `UPDATE players
-        SET fragments = $1, last_burn = NOW()
+        SET fragments = $1,
+            last_burn  = NOW()
       WHERE tg_id = $2`,
     [updated, tgId]
   );
