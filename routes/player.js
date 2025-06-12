@@ -4,10 +4,9 @@ import pool from '../db.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
-const JWT_SECRET      = process.env.JWT_SECRET;
-const TON_ADDRESS     = process.env.TON_WALLET_ADDRESS;
-const TONHUB_URL      = 'https://tonhub.com/transfer';
-const TONSPACE_SCHEME = 'ton://transfer';
+const JWT_SECRET  = process.env.JWT_SECRET;
+const TON_ADDRESS = process.env.TON_WALLET_ADDRESS;
+const TONHUB_URL  = 'https://tonhub.com/transfer';
 
 /**
  * Генерация JWT
@@ -21,7 +20,7 @@ function generateToken(payload) {
 }
 
 /**
- * GET /api/player/:tg_id — публичный маршрут
+ * GET /api/player/:tg_id — публичный
  */
 router.get('/player/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -38,13 +37,13 @@ router.get('/player/:tg_id', async (req, res) => {
     }
     res.json(rows[0]);
   } catch (err) {
-    console.error('[GET /player] error:', err);
+    console.error('[GET /player] ', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
 /**
- * POST /api/init — публичный. Создаёт игрока (если новый) и отдает JWT
+ * POST /api/init — публичный, создаёт/возвращает игрока + JWT
  */
 router.post('/init', async (req, res) => {
   const { tg_id, name, initData } = req.body;
@@ -59,29 +58,29 @@ router.post('/init', async (req, res) => {
     if (!rows.length) {
       ({ rows } = await pool.query(
         `INSERT INTO players (tg_id, name, is_cursed, curses_count, curse_expires)
-           VALUES ($1, $2, FALSE, 0, NULL)
+           VALUES ($1,$2,FALSE,0,NULL)
          RETURNING *`,
         [tg_id, name || null]
       ));
     }
-    const user = rows[0];
+    const user  = rows[0];
     const token = generateToken({ tg_id: user.tg_id, name: user.name });
     res.json({ user, token });
   } catch (err) {
-    console.error('[POST /init] error:', err);
+    console.error('[POST /init] ', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-// Ниже — все маршруты под JWT
+// Все последующие маршруты — под JWT
 router.use(authenticate);
 
 /**
- * GET /api/fragments/:tg_id — возвращает список фрагментов
+ * GET /api/fragments/:tg_id — возвращает fragments
  */
 router.get('/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
-  if (String(req.user.tg_id) !== String(tg_id)) {
+  if (`${req.user.tg_id}` !== `${tg_id}`) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
@@ -93,17 +92,17 @@ router.get('/fragments/:tg_id', async (req, res) => {
       return res.status(404).json({ error: 'player not found' });
     }
     const fragments = rows[0].fragments || [];
-    const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+    const token     = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ fragments });
   } catch (err) {
-    console.error('[GET /fragments] error:', err);
+    console.error('[GET /fragments] ', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
 /**
- * GET /api/stats/total_users — возвращает общее число игроков
+ * GET /api/stats/total_users — общее число игроков
  */
 router.get('/stats/total_users', async (req, res) => {
   try {
@@ -115,7 +114,7 @@ router.get('/stats/total_users', async (req, res) => {
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ value });
   } catch (err) {
-    console.error('[GET /stats/total_users] error:', err);
+    console.error('[GET /stats] ', err);
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ value: 0 });
@@ -123,25 +122,21 @@ router.get('/stats/total_users', async (req, res) => {
 });
 
 /**
- * POST /api/burn-invoice — создаёт счёт на 0.5 TON и возвращает два deeplink’а:
- *   • paymentUrl  — https://tonhub.com/transfer/…
- *   • tonspaceUrl — ton://transfer/…
+ * POST /api/burn-invoice — создаёт счёт и возвращает deeplink на Tonhub
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
   if (!tg_id) {
     return res.status(400).json({ ok: false, error: 'tg_id is required' });
   }
-  if (String(req.user.tg_id) !== String(tg_id)) {
+  if (`${req.user.tg_id}` !== `${tg_id}`) {
     return res.status(403).json({ ok: false, error: 'Forbidden' });
   }
 
   try {
-    // 1) Проверка кулдауна и проклятья
+    // проверка кулдауна и проклятья
     const { rows: pr } = await pool.query(
-      `SELECT last_burn, is_cursed, curse_expires
-         FROM players
-        WHERE tg_id = $1`,
+      `SELECT last_burn, is_cursed, curse_expires FROM players WHERE tg_id = $1`,
       [tg_id]
     );
     if (!pr.length) {
@@ -149,6 +144,7 @@ router.post('/burn-invoice', async (req, res) => {
     }
     const { last_burn, is_cursed, curse_expires } = pr[0];
     const now = Date.now();
+
     if (curse_expires && new Date(curse_expires).getTime() > now) {
       return res
         .status(403)
@@ -160,56 +156,46 @@ router.post('/burn-invoice', async (req, res) => {
         [tg_id]
       );
     }
-    const lastMs = last_burn ? new Date(last_burn).getTime() : 0;
-    if (now - lastMs < 2 * 60 * 1000) {
+    if (last_burn && now - new Date(last_burn).getTime() < 2 * 60 * 1000) {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // 2) Вставка счёта
-    const amountNano = 500_000_000;         // 0.5 TON в нанотоннах
-    const amountTon  = (amountNano / 1e9).toString(); // "0.5"
+    // вставляем инвойс
+    const amountNano = 500_000_000;            // 0.5 TON
     const comment    = 'burn-' + Date.now();
     const { rows: ir } = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
-       VALUES ($1, $2, $3, $4)
-       RETURNING invoice_id`,
+       VALUES ($1,$2,$3,$4) RETURNING invoice_id`,
       [tg_id, amountNano, TON_ADDRESS, comment]
     );
     const invoiceId = ir[0].invoice_id;
 
-    // 3) Формируем два deeplink’а
-    const paymentUrl  =
-      `${TONHUB_URL}/${TON_ADDRESS}` +
-      `?amount=${amountTon}` +
-      `&text=${encodeURIComponent(comment)}`;
+    // deeplink на TON-блокчейн
+    const amountTon  = (amountNano / 1e9).toString(); // "0.5"
+    const paymentUrl = `${TONHUB_URL}/${TON_ADDRESS}`
+                     + `?amount=${amountTon}`
+                     + `&text=${encodeURIComponent(comment)}`;
 
-    const tonspaceUrl =
-      `${TONSPACE_SCHEME}/${TON_ADDRESS}` +
-      `?amount=${amountTon}` +
-      `&text=${encodeURIComponent(comment)}`;
-
-    // 4) Отправляем клиенту
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
-    res.json({ ok: true, invoiceId, paymentUrl, tonspaceUrl });
+    res.json({ ok: true, invoiceId, paymentUrl });
+
   } catch (err) {
-    console.error('[POST /burn-invoice] error:', err);
+    console.error('[POST /burn-invoice] ', err);
     res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
 /**
- * GET /api/burn-status/:invoiceId? — проверка статуса
+ * GET /api/burn-status/:invoiceId? — проверка оплаты и бизнес-логика
  */
 router.get('/burn-status/:invoiceId?', async (req, res) => {
   let invoiceId = req.params.invoiceId || req.query.invoiceId;
   if (!invoiceId || invoiceId === 'null') {
     const { rows } = await pool.query(
-      `SELECT invoice_id
-         FROM burn_invoices
-        WHERE tg_id = $1
-     ORDER BY created_at DESC
-        LIMIT 1`,
+      `SELECT invoice_id FROM burn_invoices
+         WHERE tg_id = $1
+      ORDER BY created_at DESC LIMIT 1`,
       [req.user.tg_id]
     );
     invoiceId = rows[0]?.invoice_id;
@@ -226,29 +212,30 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
     if (!rows.length) {
       return res.status(404).json({ ok: false, error: 'invoice not found' });
     }
-    const inv = rows[0];
-    if (String(inv.tg_id) !== String(req.user.tg_id)) {
+    if (`${rows[0].tg_id}` !== `${req.user.tg_id}`) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
-    if (inv.status === 'paid') {
-      // здесь запускаем бизнес-логику «runBurnLogic»
+
+    if (rows[0].status === 'paid') {
+      // запускаем вашу логику и возвращаем результат
       const result = await runBurnLogic(invoiceId);
-      const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
+      const token  = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
       res.setHeader('Authorization', `Bearer ${token}`);
       return res.json({ ok: true, paid: true, ...result });
     }
-    // ещё не оплачен
+
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
-    return res.json({ ok: true, paid: false });
+    res.json({ ok: true, paid: false });
+
   } catch (err) {
-    console.error('[GET /burn-status] error:', err);
+    console.error('[GET /burn-status] ', err);
     res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
 /**
- * Бизнес-логика «сжигания» после оплаты
+ * Бизнес-логика «сжигания» (выдача фрагмента/проклятье)
  */
 async function runBurnLogic(invoiceId) {
   // пометим счёт как обработанный
@@ -257,12 +244,12 @@ async function runBurnLogic(invoiceId) {
     [invoiceId]
   );
 
-  // получим данные по счёту
+  // достанем детали
   const { rows: ir2 } = await pool.query(
     `SELECT tg_id, comment FROM burn_invoices WHERE invoice_id = $1`,
     [invoiceId]
   );
-  const { tg_id, comment } = ir2[0];
+  const tg_id = ir2[0].tg_id;
 
   // получим текущие фрагменты
   const { rows: pr } = await pool.query(
@@ -271,7 +258,7 @@ async function runBurnLogic(invoiceId) {
   );
   const current = pr[0].fragments || [];
 
-  // найдём первый свободный ID из 1–8
+  // найдём первый свободный
   const newId = [1,2,3,4,5,6,7,8].find(i => !current.includes(i));
   const updated = [...current];
   if (newId) updated.push(newId);
@@ -287,9 +274,9 @@ async function runBurnLogic(invoiceId) {
   );
 
   return {
-    cursed: false,
+    cursed:     false,
     newFragment: newId,
-    fragments: updated,
+    fragments:  updated,
     lastBurn,
   };
 }
