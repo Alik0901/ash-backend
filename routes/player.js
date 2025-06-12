@@ -206,6 +206,7 @@ router.post('/burn-invoice', async (req, res) => {
     // 4) возвращаем всё клиенту
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
+    console.log('[burn-invoice] paymentUrl=', paymentUrl, 'tonspaceUrl=', tonspaceUrl);
     res.json({ ok: true, invoiceId, paymentUrl, tonspaceUrl });
   } catch (err) {
     console.error('[POST /burn-invoice] error:', err);
