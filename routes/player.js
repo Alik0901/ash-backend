@@ -20,7 +20,7 @@ function generateToken(payload) {
 }
 
 /**
- * GET /api/player/:tg_id — публичный
+ * GET /api/player/:tg_id — публичный маршрут, возвращает профиль игрока
  */
 router.get('/player/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -37,13 +37,13 @@ router.get('/player/:tg_id', async (req, res) => {
     }
     res.json(rows[0]);
   } catch (err) {
-    console.error('[GET /player] ', err);
+    console.error('[GET /player] error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
 /**
- * POST /api/init — публичный, создаёт/возвращает игрока + JWT
+ * POST /api/init — публичный, создаёт или возвращает игрока и отдаёт JWT
  */
 router.post('/init', async (req, res) => {
   const { tg_id, name, initData } = req.body;
@@ -58,7 +58,7 @@ router.post('/init', async (req, res) => {
     if (!rows.length) {
       ({ rows } = await pool.query(
         `INSERT INTO players (tg_id, name, is_cursed, curses_count, curse_expires)
-           VALUES ($1,$2,FALSE,0,NULL)
+           VALUES ($1, $2, FALSE, 0, NULL)
          RETURNING *`,
         [tg_id, name || null]
       ));
@@ -67,16 +67,16 @@ router.post('/init', async (req, res) => {
     const token = generateToken({ tg_id: user.tg_id, name: user.name });
     res.json({ user, token });
   } catch (err) {
-    console.error('[POST /init] ', err);
+    console.error('[POST /init] error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-// Все последующие маршруты — под JWT
+// Ниже — все роуты под JWT
 router.use(authenticate);
 
 /**
- * GET /api/fragments/:tg_id — возвращает fragments
+ * GET /api/fragments/:tg_id — возвращает массив fragments
  */
 router.get('/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
@@ -96,7 +96,7 @@ router.get('/fragments/:tg_id', async (req, res) => {
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ fragments });
   } catch (err) {
-    console.error('[GET /fragments] ', err);
+    console.error('[GET /fragments] error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -114,7 +114,7 @@ router.get('/stats/total_users', async (req, res) => {
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ value });
   } catch (err) {
-    console.error('[GET /stats] ', err);
+    console.error('[GET /stats/total_users] error:', err);
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({ value: 0 });
@@ -122,7 +122,7 @@ router.get('/stats/total_users', async (req, res) => {
 });
 
 /**
- * POST /api/burn-invoice — создаёт счёт и возвращает deeplink на Tonhub
+ * POST /api/burn-invoice — создаёт счёт на 0.5 TON, возвращает deeplink на Tonhub
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -134,7 +134,7 @@ router.post('/burn-invoice', async (req, res) => {
   }
 
   try {
-    // проверка кулдауна и проклятья
+    // проверяем кулдаун и проклятие
     const { rows: pr } = await pool.query(
       `SELECT last_burn, is_cursed, curse_expires FROM players WHERE tg_id = $1`,
       [tg_id]
@@ -160,17 +160,17 @@ router.post('/burn-invoice', async (req, res) => {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // вставляем инвойс
-    const amountNano = 500_000_000;            // 0.5 TON
+    // вставляем счёт
+    const amountNano = 500_000_000;            // в наносах (0.5 TON)
     const comment    = 'burn-' + Date.now();
     const { rows: ir } = await pool.query(
       `INSERT INTO burn_invoices (tg_id, amount_nano, address, comment)
-       VALUES ($1,$2,$3,$4) RETURNING invoice_id`,
+       VALUES ($1, $2, $3, $4) RETURNING invoice_id`,
       [tg_id, amountNano, TON_ADDRESS, comment]
     );
     const invoiceId = ir[0].invoice_id;
 
-    // deeplink на TON-блокчейн
+    // собираем deeplink
     const amountTon  = (amountNano / 1e9).toString(); // "0.5"
     const paymentUrl = `${TONHUB_URL}/${TON_ADDRESS}`
                      + `?amount=${amountTon}`
@@ -181,13 +181,15 @@ router.post('/burn-invoice', async (req, res) => {
     res.json({ ok: true, invoiceId, paymentUrl });
 
   } catch (err) {
-    console.error('[POST /burn-invoice] ', err);
+    console.error('[POST /burn-invoice] error:', err);
     res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
 /**
- * GET /api/burn-status/:invoiceId? — проверка оплаты и бизнес-логика
+ * GET /api/burn-status/:invoiceId?
+ * — если invoiceId не передан или 'null', берётся последний счёт
+ * — проверяем статус; если paid — запускаем runBurnLogic и возвращаем результат
  */
 router.get('/burn-status/:invoiceId?', async (req, res) => {
   let invoiceId = req.params.invoiceId || req.query.invoiceId;
@@ -217,7 +219,7 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
     }
 
     if (rows[0].status === 'paid') {
-      // запускаем вашу логику и возвращаем результат
+      // запускаем бизнес-логику
       const result = await runBurnLogic(invoiceId);
       const token  = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
       res.setHeader('Authorization', `Bearer ${token}`);
@@ -229,41 +231,41 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
     res.json({ ok: true, paid: false });
 
   } catch (err) {
-    console.error('[GET /burn-status] ', err);
+    console.error('[GET /burn-status] error:', err);
     res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
 /**
- * Бизнес-логика «сжигания» (выдача фрагмента/проклятье)
+ * Бизнес-логика «сжигания» (выдача фрагмента или проклятье)
  */
 async function runBurnLogic(invoiceId) {
-  // пометим счёт как обработанный
+  // помечаем счёт как обработанный
   await pool.query(
     `UPDATE burn_invoices SET status = 'processed' WHERE invoice_id = $1`,
     [invoiceId]
   );
 
-  // достанем детали
+  // получаем данные платёжки
   const { rows: ir2 } = await pool.query(
     `SELECT tg_id, comment FROM burn_invoices WHERE invoice_id = $1`,
     [invoiceId]
   );
   const tg_id = ir2[0].tg_id;
 
-  // получим текущие фрагменты
+  // текущие фрагменты
   const { rows: pr } = await pool.query(
     `SELECT fragments FROM players WHERE tg_id = $1`,
     [tg_id]
   );
   const current = pr[0].fragments || [];
 
-  // найдём первый свободный
+  // выдаём первый отсутствующий (1–8)
   const newId = [1,2,3,4,5,6,7,8].find(i => !current.includes(i));
   const updated = [...current];
   if (newId) updated.push(newId);
 
-  // обновим игрока
+  // сохраняем в базу
   const lastBurn = new Date().toISOString();
   await pool.query(
     `UPDATE players
@@ -274,9 +276,9 @@ async function runBurnLogic(invoiceId) {
   );
 
   return {
-    cursed:     false,
+    cursed:      false,
     newFragment: newId,
-    fragments:  updated,
+    fragments:   updated,
     lastBurn,
   };
 }
