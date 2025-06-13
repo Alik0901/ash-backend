@@ -1,18 +1,15 @@
 import express from 'express';
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import pool from '../db.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
-const JWT_SECRET    = process.env.JWT_SECRET;
-const TON_ADDRESS   = process.env.TON_WALLET_ADDRESS;
-const TONHUB_URL    = 'https://tonhub.com/transfer';
-const TONSPACE_SCHEME = 'ton://transfer';
+const JWT_SECRET         = process.env.JWT_SECRET;
+const TON_ADDRESS        = process.env.TON_WALLET_ADDRESS;
+const TONHUB_URL         = process.env.TONHUB_URL || 'https://tonhub.com/transfer';
+const TONSPACE_SCHEME    = process.env.TONSPACE_SCHEME || 'ton://transfer';
 
-/**
- * Генерируем новый JWT
- */
+/** Генерация JWT */
 function generateToken(payload) {
   return jwt.sign(
     { tg_id: payload.tg_id, name: payload.name },
@@ -21,9 +18,7 @@ function generateToken(payload) {
   );
 }
 
-/**
- * GET /api/player/:tg_id — публичный маршрут
- */
+/** GET /api/player/:tg_id — публично */
 router.get('/player/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
   try {
@@ -34,9 +29,7 @@ router.get('/player/:tg_id', async (req, res) => {
         LIMIT 1`,
       [tg_id]
     );
-    if (!rows.length) {
-      return res.status(404).json({ error: 'player not found' });
-    }
+    if (!rows.length) return res.status(404).json({ error: 'player not found' });
     res.json(rows[0]);
   } catch (err) {
     console.error('[GET /player] error:', err);
@@ -44,19 +37,14 @@ router.get('/player/:tg_id', async (req, res) => {
   }
 });
 
-/**
- * POST /api/init — публичный, создаёт игрока (если нового) и отдаёт JWT
- */
+/** POST /api/init — создаёт игрока и JWT */
 router.post('/init', async (req, res) => {
   const { tg_id, name, initData } = req.body;
   if (!tg_id || !initData) {
     return res.status(400).json({ error: 'tg_id and initData are required' });
   }
   try {
-    let { rows } = await pool.query(
-      `SELECT * FROM players WHERE tg_id = $1`,
-      [tg_id]
-    );
+    let { rows } = await pool.query(`SELECT * FROM players WHERE tg_id = $1`, [tg_id]);
     if (!rows.length) {
       ({ rows } = await pool.query(
         `INSERT INTO players (tg_id, name, is_cursed, curses_count, curse_expires)
@@ -74,12 +62,10 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// Всё ниже — под защитой JWT
+// дальше JWT-защищённые роуты
 router.use(authenticate);
 
-/**
- * GET /api/fragments/:tg_id — вернуть список фрагментов
- */
+/** GET /api/fragments/:tg_id */
 router.get('/fragments/:tg_id', async (req, res) => {
   const { tg_id } = req.params;
   if (String(req.user.tg_id) !== String(tg_id)) {
@@ -93,19 +79,16 @@ router.get('/fragments/:tg_id', async (req, res) => {
     if (!rows.length) {
       return res.status(404).json({ error: 'player not found' });
     }
-    const fragments = rows[0].fragments || [];
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
-    res.json({ fragments });
+    res.json({ fragments: rows[0].fragments || [] });
   } catch (err) {
     console.error('[GET /fragments] error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });
 
-/**
- * GET /api/stats/total_users — общее число игроков
- */
+/** GET /api/stats/total_users */
 router.get('/stats/total_users', async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -124,9 +107,10 @@ router.get('/stats/total_users', async (req, res) => {
 });
 
 /**
- * POST /api/burn-invoice — создаёт счёт на 0.5 TON и возвращает два deeplink’а:
- *  • paymentUrl    — ссылка на TONHUB (https),
- *  • tonspaceUrl   — схема ton:// для встроенного кошелька Telegram
+ * POST /api/burn-invoice
+ * — проверяем кулдаун/проклятие
+ * — создаём запись в burn_invoices
+ * — отдаем два deeplink’а с фикс. суммой 0.5 TON
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -138,16 +122,15 @@ router.post('/burn-invoice', async (req, res) => {
   }
 
   try {
-    // 1) проверим кулдаун и проклятие
+    // кулдаун и проклятие
     const { rows: pr } = await pool.query(
       `SELECT last_burn, is_cursed, curse_expires
          FROM players
         WHERE tg_id = $1`,
       [tg_id]
     );
-    if (!pr.length) {
-      return res.status(404).json({ ok: false, error: 'player not found' });
-    }
+    if (!pr.length) return res.status(404).json({ ok: false, error: 'player not found' });
+
     const { last_burn, is_cursed, curse_expires } = pr[0];
     const now = Date.now();
     if (curse_expires && new Date(curse_expires).getTime() > now) {
@@ -166,7 +149,7 @@ router.post('/burn-invoice', async (req, res) => {
       return res.status(429).json({ ok: false, error: 'Burn cooldown active' });
     }
 
-    // 2) вставляем счёт в базу
+    // создаём инвойс
     const amountNano = 500_000_000;               // 0.5 TON в наносах
     const amountTon  = (amountNano / 1e9).toString(); // "0.5"
     const comment    = 'burn-' + Date.now();
@@ -178,37 +161,30 @@ router.post('/burn-invoice', async (req, res) => {
     );
     const invoiceId = ir[0].invoice_id;
 
-    // 3) собираем два варианта ссылки
-    // 3.1) HTTPS для Tonhub
+    // формируем deeplink’ы
     const paymentUrl  = `${TONHUB_URL}/${TON_ADDRESS}` +
                         `?amount=${amountTon}` +
                         `&text=${encodeURIComponent(comment)}`;
-    // 3.2) схема ton:// для встроенного кошелька Telegram
     const tonspaceUrl = `${TONSPACE_SCHEME}/${TON_ADDRESS}` +
                         `?amount=${amountTon}` +
                         `&text=${encodeURIComponent(comment)}`;
 
-    // 4) возвращаем ответ
+    // отдаём клиенту
     const token = generateToken({ tg_id: req.user.tg_id, name: req.user.name });
     res.setHeader('Authorization', `Bearer ${token}`);
     res.json({
       ok: true,
       invoiceId,
-      paymentUrl,    // для кнопки «Open in Tonhub»
-      tonspaceUrl,   // для кнопки «Continue in Telegram Wallet»
+      paymentUrl,
+      tonspaceUrl,
     });
-
   } catch (err) {
     console.error('[POST /burn-invoice] error:', err);
     res.status(500).json({ ok: false, error: 'internal error' });
   }
 });
 
-/**
- * GET /api/burn-status/:invoiceId?
- * — если invoiceId не передан или 'null', берём последний созданный счёт
- * — если он уже «paid» и не был «обработан», запускаем runBurnLogic
- */
+/** GET /api/burn-status/:invoiceId? */
 router.get('/burn-status/:invoiceId?', async (req, res) => {
   let invoiceId = req.params.invoiceId || req.query.invoiceId;
   if (!invoiceId || invoiceId === 'null') {
@@ -231,9 +207,8 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
       `SELECT tg_id, status FROM burn_invoices WHERE invoice_id = $1`,
       [invoiceId]
     );
-    if (!rows.length) {
-      return res.status(404).json({ ok: false, error: 'invoice not found' });
-    }
+    if (!rows.length) return res.status(404).json({ ok: false, error: 'invoice not found' });
+
     const inv = rows[0];
     if (String(inv.tg_id) !== String(req.user.tg_id)) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
@@ -253,9 +228,7 @@ router.get('/burn-status/:invoiceId?', async (req, res) => {
   }
 });
 
-/**
- * Бизнес-логика «сжигания» (пример — всегда даём новый фрагмент)
- */
+/** Бизнес-логика «сжигания» */
 async function runBurnLogic(invoiceId) {
   await pool.query(
     `UPDATE burn_invoices SET status = 'processed' WHERE invoice_id = $1`,
@@ -265,7 +238,7 @@ async function runBurnLogic(invoiceId) {
     `SELECT tg_id, comment FROM burn_invoices WHERE invoice_id = $1`,
     [invoiceId]
   );
-  const { tg_id, comment } = ir2[0];
+  const { tg_id } = ir2[0];
 
   const { rows: pr } = await pool.query(
     `SELECT fragments FROM players WHERE tg_id = $1`,
