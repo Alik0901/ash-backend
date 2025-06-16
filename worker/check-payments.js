@@ -1,63 +1,49 @@
-// worker/check-payments.js
 import fetch from 'node-fetch';
 import pool  from '../db.js';
 
-const RPC_URL     = process.env.TON_RPC_ENDPOINT;    // например, https://rpc.tonhub.com
-const TON_ADDRESS = process.env.TON_WALLET_ADDRESS; // ваш адрес
-const INTERVAL    = 30_000;                         // проверять раз в 30 секунд
+const API   = process.env.TON_RPC_ENDPOINT      // https://toncenter.com/api/v2
+const KEY   = process.env.TONCENTER_API_KEY     // опционально
+const ADDR  = process.env.TON_WALLET_ADDRESS;   // ваш кошелёк
+const STEP  = 30_000;                           // каждые 30 секунд
+
+async function getLastTxs(limit = 20) {
+  const url = `${API}/getTransactions?address=${ADDR}&limit=${limit}`;
+  const resp = await fetch(url, {
+    headers: KEY ? { 'X-API-Key': KEY } : {}
+  }).then(r => r.json());
+  return resp.result;         // массив транзакций
+}
 
 async function checkPending() {
-  // 1) Берём все pending-инвойсы из БД
-  const { rows: pendings } = await pool.query(`
-    SELECT invoice_id, comment
-      FROM burn_invoices
-     WHERE status = 'pending'
-  `);
+  // 1) все pending инвойсы
+  const { rows } = await pool.query(
+    `SELECT invoice_id, comment
+       FROM burn_invoices
+      WHERE status = 'pending'`
+  );
 
-  for (const { invoice_id, comment } of pendings) {
-    try {
-      // 2) Запрашиваем все входящие сообщения в messages-коллекции
-      const rpcBody = {
-        jsonrpc: '2.0',
-        id:      1,
-        method:  'net.query_collection',
-        params: {
-          collection: 'messages',
-          filter: {
-            dst:     { eq: TON_ADDRESS },
-            '@type': { eq: 'msg.dataRaw' }
-          },
-          result: 'id body'
-        }
-      };
+  if (!rows.length) return;
 
-      const rpcResp = await fetch(RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(rpcBody)
-      }).then(r => r.json());
+  // 2) свежие входящие tx
+  const txs = await getLastTxs(50);
 
-      const msgs = rpcResp.result?.result || [];
-      // комментарий сверяем в hex
-      const hexComment = Buffer.from(comment).toString('hex');
-      const paid = msgs.some(m => m.body.includes(hexComment));
+  for (const inv of rows) {
+    const match = txs.find(t =>
+      t.in_msg?.msg_data?.text === inv.comment &&
+      Number(t.in_msg?.value)   >= 500_000_000      // минимум 0.5 TON
+    );
 
-      if (paid) {
-        // 3) Обновляем статус в БД
-        await pool.query(`
-          UPDATE burn_invoices
-             SET status  = 'paid',
-                 paid_at = NOW()
-           WHERE invoice_id = $1
-        `, [invoice_id]);
-        console.log(`✔ marked paid: ${invoice_id}`);
-      }
-    } catch (err) {
-      console.error(`❌ error checking invoice ${invoice_id}:`, err);
+    if (match) {
+      await pool.query(
+        `UPDATE burn_invoices
+            SET status='paid', paid_at=NOW()
+          WHERE invoice_id=$1`,
+        [inv.invoice_id]
+      );
+      console.log(`✔ invoice ${inv.invoice_id} marked PAID`);
     }
   }
 }
 
-// Запуск по таймеру
-console.log(`🚀 Payment-checker started (every ${INTERVAL/1000}s)`);
-setInterval(checkPending, INTERVAL);
+console.log(`🚀 Payment-checker started (every ${STEP/1000}s)`);
+setInterval(checkPending, STEP);
