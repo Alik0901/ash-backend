@@ -16,7 +16,7 @@ const app = express();
 // 1. HTTP security headers
 app.use(helmet());
 
-// 2. CORS — разрешаем только фронт и Telegram Web
+// 2. CORS — разрешаем только фронт и Telegram WebApp
 app.use(
   cors({
     origin: [
@@ -41,16 +41,28 @@ app.use('/api/validate', validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
 // 5. «Прокси» для всех маршрутов /api:
-//    - POST /api/init и GET /api/player/:tg_id — без authenticate
+//    - Пропускаем preflight (OPTIONS) для CORS
+//    - POST /api/init и GET /api/player/:tg_id — публично
 //    - всё остальное — через authenticate
 app.use('/api', (req, res, next) => {
   const { method, path } = req;
+
+  // 5.1. Всегда пропускаем preflight
+  if (method === 'OPTIONS') {
+    return next();
+  }
+
+  // 5.2. Публичный init
   if (method === 'POST' && path === '/init') {
     return next();
   }
+
+  // 5.3. Публичный профиль
   if (method === 'GET' && path.match(/^\/player\/[^/]+$/)) {
     return next();
   }
+
+  // 5.4. Всё остальное — авторизация
   return authenticate(req, res, next);
 });
 
