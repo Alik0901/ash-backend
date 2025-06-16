@@ -13,7 +13,6 @@ const pool = new Pool({
   keepAlive: true,
   // закрывать неактивные клиенты через 30 сек
   idleTimeoutMillis: 30_000,
-  // максимум 5 сек на установление нового подключения
   connectionTimeoutMillis: 5_000,
 });
 
