@@ -5,6 +5,9 @@ import dotenv from 'dotenv';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
+// ------------ запустим воркер в том же процессе ------------
+import './worker/check-payments.js';  // <-- вот это
+
 import playerRoutes       from './routes/player.js';
 import validateRoute      from './routes/validate.js';
 import validateFinalRoute from './routes/validateFinal.js';
