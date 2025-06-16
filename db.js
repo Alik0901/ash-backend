@@ -1,23 +1,22 @@
-// src/db.js
-import pkg from 'pg';
+// db.js
+import pg from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const { Pool } = pkg;
+const { Pool } = pg;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  // включаем TCP keep-alive, чтобы держать сокеты живыми
-  keepAlive: true,
-  // закрывать неактивные клиенты через 30 сек
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
+  ssl: { rejectUnauthorized: false }, // Railway → Postgres: нужен SSL
+  // дополнительные, но безопасные параметры
+  keepAlive: true,            // TCP keep-alive
+  idleTimeoutMillis: 30_000,  // закроет неактивные через 30 c
+  connectionTimeoutMillis: 5_000 // ждать подключения ≤ 5 c
 });
 
-// Ловим «неожиданные» ошибки клиента
-pool.on('error', (err, client) => {
+// логируем неожиданные ошибки клиента
+pool.on('error', (err) => {
   console.error('Unexpected PG client error', err);
 });
 
