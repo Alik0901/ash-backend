@@ -4,7 +4,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check-payments": "node worker/check-payments.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -13,6 +14,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2",
     "pg": "^8.11.1"
   }
 }
