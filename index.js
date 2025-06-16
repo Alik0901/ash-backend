@@ -41,13 +41,13 @@ app.use('/api/validate', validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
 // 5. «Прокси» для всех маршрутов /api:
-//    - Пропускаем preflight (OPTIONS) для CORS
-//    - POST /api/init и GET /api/player/:tg_id — публично
-//    - всё остальное — через authenticate
+//    - Всегда пропускаем preflight (OPTIONS)
+//    - POST /api/init и GET /api/player/:tg_id — без authenticate
+//    - Всё остальное — через authenticate
 app.use('/api', (req, res, next) => {
   const { method, path } = req;
 
-  // 5.1. Всегда пропускаем preflight
+  // 5.1. Пропускаем CORS preflight
   if (method === 'OPTIONS') {
     return next();
   }
@@ -62,7 +62,7 @@ app.use('/api', (req, res, next) => {
     return next();
   }
 
-  // 5.4. Всё остальное — авторизация
+  // 5.4. Все остальные — проверка JWT
   return authenticate(req, res, next);
 });
 
