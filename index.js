@@ -13,25 +13,28 @@ import { authenticate }   from './middleware/auth.js';
 dotenv.config();
 const app = express();
 
-// 1. HTTP security headers
+// 1. Безопасные HTTP-заголовки
 app.use(helmet());
 
-// 2. CORS — разрешаем только фронт и Telegram WebApp
-app.use(
-  cors({
-    origin: [
-      'https://clean-ash-order.vercel.app',
-      'https://web.telegram.org',
-    ],
-  })
-);
+// 2. CORS — разрешаем фронту и Telegram WebApp
+const corsConfig = {
+  origin: [
+    'https://clean-ash-order.vercel.app',
+    'https://web.telegram.org',
+  ],
+};
+app.use(cors(corsConfig));                      // CORS для простых запросов
+app.options('/api/*', cors(corsConfig), (req, res) => {
+  // Явно обрабатываем preflight на всех /api/*
+  res.sendStatus(204);
+});
 
-// 3. Парсинг JSON с ограничением размера
+// 3. Парсинг JSON-тела (макс. 10kb)
 app.use(express.json({ limit: '10kb' }));
 
-// 4. Rate limiting для validate и validate-final
+// 4. Rate limiting для маршрутов validate и validate-final
 const validateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * 60 * 1000, // 15 минут
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
@@ -40,33 +43,34 @@ const validateLimiter = rateLimit({
 app.use('/api/validate', validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-// 5. «Прокси» для всех маршрутов /api:
-//    - Всегда пропускаем preflight (OPTIONS)
-//    - POST /api/init и GET /api/player/:tg_id — без authenticate
-//    - Всё остальное — через authenticate
+// 5. Прокси для всех /api:
+//    • OPTIONS /api/*         — пропускаем (preflight обработан выше)
+//    • POST  /api/init         — публичный (регистрация)
+//    • GET   /api/player/:tgId — публичный (чтение профиля)
+//    • всё остальное           — через authenticate
 app.use('/api', (req, res, next) => {
   const { method, path } = req;
 
-  // 5.1. Пропускаем CORS preflight
+  // 5.1. Preflight уже пропущен через app.options
   if (method === 'OPTIONS') {
     return next();
   }
 
-  // 5.2. Публичный init
+  // 5.2. Регистрация нового игрока
   if (method === 'POST' && path === '/init') {
     return next();
   }
 
-  // 5.3. Публичный профиль
+  // 5.3. Получение профиля по tg_id
   if (method === 'GET' && path.match(/^\/player\/[^/]+$/)) {
     return next();
   }
 
-  // 5.4. Все остальные — проверка JWT
+  // 5.4. Всё остальное — проверяем JWT
   return authenticate(req, res, next);
 });
 
-// 6. Подключаем playerRoutes на /api
+// 6. Подключаем маршруты из routes/player.js
 app.use('/api', playerRoutes);
 
 // 7. Запуск сервера
