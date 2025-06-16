@@ -12,7 +12,7 @@ const pool = new Pool({
   // дополнительные, но безопасные параметры
   keepAlive: true,            // TCP keep-alive
   idleTimeoutMillis: 30_000,  // закроет неактивные через 30 c
-  connectionTimeoutMillis: 5_000 // ждать подключения ≤ 5 c
+  connectionTimeoutMillis: 5_000 
 });
 
 // логируем неожиданные ошибки клиента
