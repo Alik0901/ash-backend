@@ -79,6 +79,11 @@ async function checkOnce() {
 
     const { lt, hash } = raw.transaction_id;
     const tx   = await getTx(lt, hash);               // decode=true
+       if (process.env.DEBUG_PAYLOAD === '1') {
+         const md = tx?.in_msg?.msg_data || {};
+         console.log('🪵 full msg_data for lt', lt);
+         console.dir(md, { depth: 6 });
+        }
     const md   = tx?.in_msg?.msg_data || {};
     const text = md.text || extractBurnTag(md.payload);
 
