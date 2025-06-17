@@ -84,6 +84,14 @@ async function checkOnce() {
          console.log('🪵 full msg_data for lt', lt);
          console.dir(md, { depth: 6 });
         }
+        if (!global._debugDumped) {
+          const md = tx?.in_msg?.msg_data || tx?.in_msg || {};
+          console.log(
+          '🍰 DEBUG_MSG_DATA',
+          JSON.stringify(md, null, 2)          // ПЕЧАТАЕМ ТОЛЬКО msg_data
+        );
+         global._debugDumped = true;           // печатаем ровно один раз
+        }
         if (process.env.DEBUG_TX === '1') {
           console.log('🐙 FULL TX', JSON.stringify(tx, null, 2));
          // логируем первый входящий, чтобы не захламлять вывод
