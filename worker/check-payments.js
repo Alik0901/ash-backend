@@ -98,6 +98,14 @@ async function checkOnce() {
          process.env.DEBUG_TX = '0';
         }
     const md   = tx?.in_msg?.msg_data || {};
+    const rawBody = tx?.in_msg?.msg_data?.body
+             || tx?.in_msg?.body
+             || tx?.data?.body;
+
+      if (rawBody && !global._dumpedBody) {
+       console.log('🍰 RAW_BODY_B64', rawBody.slice(0, 120) + '…'); // чтобы не занять лог
+       global._dumpedBody = true;
+    }
     const text = md.text || extractBurnTag(md.payload);
 
     console.log('→ decoded', {
