@@ -1,136 +1,133 @@
-/**
- * Payment-checker с расширенным извлечением комментария.
- *
- * 1. Берёт все pending-инвойсы из БД
- * 2. Читает последние транзакции кошелька через TonCenter
- * 3. Любой входящий ≥0.5 TON → вытаскиваем burn-uuid
- * 4. Если совпало — UPDATE burn_invoices SET status='paid'
- *
- * Подробные логи:
- *   ⏳ pending-id, 📥 кол-во raw-tx, → расшифровка каждой,
- *   ✔ найдено совпадение.
- */
+// worker/check-payments.js
+// ------------------------------------------------------------
+// ⚙️  ENV (обязательно задайте в Railway → Variables)
+//   DATABASE_URL         — строка подключения Postgres
+//   TON_WALLET_ADDRESS   — ваш адрес (UQ… / EQ…)
+//   TONCENTER_API_KEY    — не обязателен (TonCenter работает без ключа, но → 60 rps)
+//   CHECK_INTERVAL_MS    — частота проверки (по-умолчанию 30 000)
+//   DEBUG_TX             — =1 даст детальный вывод каждой транзакции
+//
+// ------------------------------------------------------------
+import dotenv             from 'dotenv';
+import fetch              from 'node-fetch';
+import { Pool }           from 'pg';
+import { base64Decode }   from './lib/boc.js';   // ↓ маленькая утилита в конце файла
 
-import fetch   from 'node-fetch';
-import pool    from '../db.js';
-import { Buffer } from 'node:buffer';
+dotenv.config();
 
-// ──────────── конфигурация ────────────
-const STEP_MS   = 30_000;                     // опрос каждые 30 с
-const AMOUNT_NT = 500_000_000;                // 0.5 TON в нано
-const ADDRESS   = process.env.TON_WALLET_ADDRESS;
-const API_HOST  = process.env.TON_RPC_ENDPOINT || 'https://toncenter.com/api/v2';
-const API_KEY   = process.env.TONCENTER_API_KEY || '';
+// ---------- DB ----------
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-if (!ADDRESS) { console.error('❌ TON_WALLET_ADDRESS не задан'); process.exit(1); }
+// ---------- TonCenter ----------
+const TON_ADDR   = process.env.TON_WALLET_ADDRESS;
+const API_KEY    = process.env.TONCENTER_API_KEY || '';
+const ENDPOINT   = 'https://toncenter.com/api/v2/getTransactions'
+                 + `?address=${TON_ADDR}`
+                 + '&limit=30&decode=true&archival=true&include_msg_body=true';
 
-const HEADERS = API_KEY ? { 'X-API-Key': API_KEY } : {};
+const headers = API_KEY ? { 'X-API-Key': API_KEY } : {};
 
-/* ───────── helpers ───────── */
-
-/** @return Buffer[] raw-transactions (decode=false) */
-async function getRaw(limit = 40) {
-  const url = `${API_HOST}/getTransactions?address=${ADDRESS}&limit=${limit}&archival=true`;
-  return fetch(url, { headers: HEADERS }).then(r => r.json()).then(j => j.result || []);
+// ---------- основные функции ----------
+async function loadPending() {
+  const { rows } = await pool.query(`
+      SELECT invoice_id, tg_id, comment
+        FROM burn_invoices
+       WHERE status = 'pending'
+  `);
+  return rows;                    // [{ invoice_id, tg_id, comment }, …]
 }
 
-/** @return Object одна транзакция (decode=true) */
-async function getTx(lt, hash) {
-  const url = `${API_HOST}/getTransaction?address=${ADDRESS}&lt=${lt}&hash=${hash}&decode=true`;
-  return fetch(url, { headers: HEADERS }).then(r => r.json()).then(j => j.result);
-}
+function extractComment(tx) {
+  // 1) самый лёгкий путь — TonCenter сам кладёт расшифрованный текст:
+  const txt1 = tx?.in_msg?.msg_data?.text;
+  if (txt1) return txt1.trim();
 
-/** Извлекаем `burn-<uuid>` из payload:
- *   1. конвертируем base64→Buffer
- *   2. собираем все печатные ASCII
- *   3. ищем regexp `burn-[0-9a-f-]{36}`
- */
-function extractBurnTag(b64 = '') {
+  // 2) если TonCenter вернул только raw body (base64-BOC) — пробуем распарсить
+  const raw =
+        tx?.in_msg?.msg_data?.body ??
+        tx?.in_msg?.body ??
+        tx?.body;
+
+  if (!raw) return null;
+
+  // пробуем извлечь человекочитаемые символы без полноценного парсинга BOC
   try {
-    const buf  = Buffer.from(b64, 'base64');
-    let ascii  = '';
-    for (const b of buf) {
-      if (b >= 0x20 && b <= 0x7E) ascii += String.fromCharCode(b);
-      else if (ascii.length) ascii += ' ';
-    }
-    const m = ascii.match(/burn-[0-9a-f-]{36}/i);
-    return m ? m[0] : '';
-  } catch { return ''; }
+    const bytes = base64Decode(raw);              // Uint8Array
+    const ascii = Buffer.from(bytes).toString('utf8');
+    // оставляем только печатные ASCII 32-126
+    const clean = ascii.replace(/[^\x20-\x7E]/g, '').trim();
+    if (clean.length) return clean;
+  } catch { /* ignore */ }
+
+  return null;
 }
 
-// ───────── основной цикл ─────────
-async function checkOnce() {
-  // pending
-  const { rows: pend } = await pool.query(
-    `SELECT invoice_id, comment FROM burn_invoices WHERE status='pending'`
-  );
-  console.log('⏳ pending:', pend.length, pend.map(p => p.invoice_id));
+async function markPaid(invoiceId) {
+  await pool.query(`
+      UPDATE burn_invoices
+         SET status   = 'paid',
+             paid_at  = now()
+       WHERE invoice_id = $1
+  `, [invoiceId]);
+  console.log('💰 invoice paid', invoiceId);
+}
 
-  if (!pend.length) return;
+async function scan() {
+  const pending = await loadPending();
+  if (!pending.length) return;                         // ничего ждать
+  console.log('⏳ pending:', pending.length,
+              pending.map(p => `\n   ${p.comment}`).join(''));
 
-  // raw-tx
-  const raws = await getRaw(40);
-  console.log('📥 raw tx fetched:', raws.length);
+  // загружаем свежие входящие транзакции кошелька
+  const r   = await fetch(ENDPOINT, { headers });
+  const res = await r.json();
+  if (!res.ok) throw new Error(res.error || 'TonCenter error');
 
-  for (const raw of raws) {
-    if (!raw.in_msg) continue;                         // не входящий → skip
-    const nano = Number(raw.in_msg.value || 0);
-    if (nano < AMOUNT_NT) continue;                   // меньше 0.5
+  const txs = res.result.filter(t => t.in_msg);        // только входящие
+  console.log('📨 raw tx fetched:', txs.length);
 
-    const { lt, hash } = raw.transaction_id;
-    const tx   = await getTx(lt, hash);               // decode=true
-       if (process.env.DEBUG_PAYLOAD === '1') {
-         const md = tx?.in_msg?.msg_data || {};
-         console.log('🪵 full msg_data for lt', lt);
-         console.dir(md, { depth: 6 });
-        }
-        if (!global._debugDumped) {
-          const md = tx?.in_msg?.msg_data || tx?.in_msg || {};
-          console.log(
-          '🍰 DEBUG_MSG_DATA',
-          JSON.stringify(md, null, 2)          // ПЕЧАТАЕМ ТОЛЬКО msg_data
-        );
-         global._debugDumped = true;           // печатаем ровно один раз
-        }
-        if (process.env.DEBUG_TX === '1') {
-          console.log('🐙 FULL TX', JSON.stringify(tx, null, 2));
-         // логируем первый входящий, чтобы не захламлять вывод
-         process.env.DEBUG_TX = '0';
-        }
-    const md   = tx?.in_msg?.msg_data || {};
-    const rawBody = tx?.in_msg?.msg_data?.body
-             || tx?.in_msg?.body
-             || tx?.data?.body;
-
-      if (rawBody && !global._dumpedBody) {
-       console.log('🍰 RAW_BODY_B64', rawBody.slice(0, 120) + '…'); // чтобы не занять лог
-       global._dumpedBody = true;
+  // при необходимости логируем каждую транзакцию целиком
+  if (process.env.DEBUG_TX === '1') {
+    for (const tx of txs) {
+      console.dir(tx, { depth: 6 });
     }
-    const text = md.text || extractBurnTag(md.payload);
+  }
 
-    console.log('→ decoded', {
-      lt,
-      nano,
-      text: text || 'undefined'
-    });
+  for (const tx of txs) {
+    const comment = extractComment(tx);
+    const value   = Number(tx?.in_msg?.value || 0);     // в наносах
 
-    // сравниваем
-    for (const inv of pend) {
-      if (text === inv.comment) {
-        await pool.query(
-          `UPDATE burn_invoices
-              SET status='paid', paid_at=NOW()
-            WHERE invoice_id=$1`,
-          [inv.invoice_id]
-        );
-        console.log('✔ PAID', inv.invoice_id);
-      }
+    if (process.env.DEBUG_TX === '1') {
+      console.log('  → decoded',
+        '{ lt:', `'${tx.utime}${tx.transaction_id?.lt ? '/' + tx.transaction_id.lt : ''}'`,
+        ', nano:', value, ', text:', `'${comment}' }`);
     }
-    await new Promise(r => setTimeout(r, 120));       // анти-спам TonCenter
+
+    if (!comment || value < 500_000_000) continue;      // < 0.5 TON
+
+    const inv = pending.find(p => p.comment === comment);
+    if (!inv) continue;                                // не наш платёж
+
+    await markPaid(inv.invoice_id);
   }
 }
 
-// ───────── запуск ─────────
-console.log(`🚀 Payment-checker started (interval ${STEP_MS/1000}s)`);
-await checkOnce();
-setInterval(checkOnce, STEP_MS);
+// ---------- циклический луп ----------
+const INTERVAL = Number(process.env.CHECK_INTERVAL_MS) || 30_000;
+console.log('🚀 Payment-checker started (interval', INTERVAL / 1000, 's)');
+
+setInterval(() => {
+  scan().catch(err => console.error('❌ payment-checker error:', err));
+}, INTERVAL);
+
+// ------------------------------------------------------------
+// mini-helper: очень примитивное Base64 → Uint8Array без зависимостей
+// ------------------------------------------------------------
+function base64Decode(b64) {
+  return Uint8Array.from(Buffer.from(
+    b64.replace(/[-_]/g, m => (m === '-' ? '+' : '/'))
+      .padEnd(Math.ceil(b64.length / 4) * 4, '='), 'base64'));
+}
