@@ -84,6 +84,11 @@ async function checkOnce() {
          console.log('🪵 full msg_data for lt', lt);
          console.dir(md, { depth: 6 });
         }
+        if (process.env.DEBUG_TX === '1') {
+          console.log('🐙 FULL TX', JSON.stringify(tx, null, 2));
+         // логируем первый входящий, чтобы не захламлять вывод
+         process.env.DEBUG_TX = '0';
+        }
     const md   = tx?.in_msg?.msg_data || {};
     const text = md.text || extractBurnTag(md.payload);
 
