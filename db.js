@@ -8,10 +8,10 @@ const { Pool } = pg;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },  // Railway / Render требуют SSL
-  keepAlive: true,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000
+  ssl:{ rejectUnauthorized:false },
+  max: 5,               // <= pool size
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 pool.on('error', err => {
