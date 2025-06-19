@@ -1,8 +1,12 @@
+// routes/validate.js – проверка подписи Telegram initData
 import express from 'express';
-import crypto from 'crypto';
+import crypto  from 'crypto';
+import dotenv  from 'dotenv';
 
-const router = express.Router();
-const BOT_TOKEN = process.env.BOT_TOKEN;
+dotenv.config();
+
+const router    = express.Router();
+const BOT_TOKEN = process.env.BOT_TOKEN;          // задаётся в .env
 
 router.post('/', (req, res) => {
   const { initData } = req.body;
@@ -13,38 +17,34 @@ router.post('/', (req, res) => {
   }
 
   try {
+    /* ── раскладываем initData ───────────────────────────────────────── */
     const parsed = new URLSearchParams(initData);
-    const hash = parsed.get('hash');
-    parsed.delete('hash');
+    const hash   = parsed.get('hash');
+    parsed.delete('hash');               // сигнатура не участвует в вычислении
 
     const dataCheckString = [...parsed.entries()]
-      .map(([key, val]) => `${key}=${val}`)
+      .map(([k, v]) => `${k}=${v}`)
       .sort()
       .join('\n');
 
-    const secretPart = BOT_TOKEN.includes(':') ? BOT_TOKEN.split(':')[1] : BOT_TOKEN;
-    const secret = crypto.createHash('sha256').update(secretPart).digest();
-    const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex'); // <-- HEX!
-
-    console.log('\n✅ VALIDATE FINAL 🔐');
-    console.log('BOT_TOKEN:', BOT_TOKEN);
-    console.log('Secret part:', secretPart);
-    console.log('dataCheckString:', dataCheckString);
-    console.log('query_id:', parsed.get('query_id'));
-    console.log('signature=', hash);
-    console.log('user=', parsed.get('user'));
-    console.log('expected HMAC:', hmac);
-    console.log('received hash:', hash);
+    /* ── Telegram-алгоритм ───────────────────────────────────────────── */
+    const secretPart = BOT_TOKEN.includes(':')
+      ? BOT_TOKEN.split(':')[1]          // "...:botHash" → берём вторую часть
+      : BOT_TOKEN;
+    const secret = crypto.createHash('sha256')
+                          .update(secretPart)
+                          .digest();
+    const hmac   = crypto.createHmac('sha256', secret)
+                         .update(dataCheckString)
+                         .digest('hex');          // hex lower-case
 
     if (hmac !== hash) {
-      console.warn('❌ Invalid signature');
+      console.warn('[VALIDATE] ❌ Invalid signature');
       return res.status(403).json({ ok: false, error: 'Invalid signature' });
     }
 
-    const userRaw = parsed.get('user');
-    const user = JSON.parse(userRaw);
-
-    console.log('✅ Signature valid. User:', user);
+    /* ── успех ───────────────────────────────────────────────────────── */
+    const user = JSON.parse(parsed.get('user'));
     return res.json({ ok: true, user });
   } catch (err) {
     console.error('[VALIDATE ERROR]', err);
