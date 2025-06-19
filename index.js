@@ -13,7 +13,9 @@ import validateRoute      from './routes/validate.js';
 import validateFinalRoute from './routes/validateFinal.js';
 import { authenticate }   from './middleware/auth.js';
 
-dotenv.config();
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config();
+}
 const app = express();
 
 /* ── security & cors ───────────────────────────────────────── */
