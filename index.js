@@ -1,16 +1,16 @@
-// index.js — окончательная версия с Health-check
+// index.js — окончательная версия с расширенным CORS и health-check
 import express        from 'express';
-import cors           from 'cors';
 import helmet         from 'helmet';
+import cors           from 'cors';
 import rateLimit      from 'express-rate-limit';
 import dotenv         from 'dotenv';
 
-// 1) воркер проверки платежей (каждые 30 с)
+// воркер проверки платежей
 import './worker/check-payments.js';
 
-import playerRoutes       from './routes/player.js';
 import validateRoute      from './routes/validate.js';
 import validateFinalRoute from './routes/validateFinal.js';
+import playerRoutes       from './routes/player.js';
 import { authenticate }   from './middleware/auth.js';
 
 // Загружаем .env только в development
@@ -20,74 +20,87 @@ if (process.env.NODE_ENV !== 'production') {
 
 const app = express();
 
-// ── 1. Безопасные HTTP-заголовки ──────────────────────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 1) Безопасные HTTP-заголовки                                   */
 app.use(helmet());
 
-// ── 2. CORS для фронта и Telegram WebApp ───────────────────────
-const corsConfig = {
-  origin: [
-    'https://clean-ash-order.vercel.app',
-    'https://web.telegram.org'
-  ]
-};
-app.use(cors(corsConfig));
-app.options('/api/*', cors(corsConfig), (_req, res) => {
-  res.sendStatus(204);
-});
+/* ──────────────────────────────────────────────────────────────── */
+/* 2) CORS: разрешаем запросы только с вашего фронта и Telegram   */
+const ALLOWED = [
+  'https://clean-ash-order.vercel.app',
+  'https://web.telegram.org'
+];
 
-// ── 3. Health-check для Railway ─────────────────────────────────
+app.use(cors({
+  origin: (origin, callback) => {
+    // не-браузерные клиенты (curl, Postman) пропускаем
+    if (!origin) return callback(null, true);
+    if (ALLOWED.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS blocked for origin ${origin}`));
+  },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+}));
+// Обрабатываем preflight для всех путей
+app.options('*', cors());
+
+/* ──────────────────────────────────────────────────────────────── */
+/* 3) Health-check для Railway (root GET должен вернуть 200)      */
 app.get('/', (_req, res) => {
-  // Всегда возвращаем 200 OK, чтобы контейнер считался healthy
   res.sendStatus(200);
 });
 
-// ── 4. Отключаем ETag и запрещаем кэширование API ───────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 4) Отключаем ETag и запрещаем кэширование всех /api              */
 app.disable('etag');
 app.use('/api', (_req, res, next) => {
-  res.set('Cache-Control', 'no-store');
+  res.set('Cache-Control','no-store');
   next();
 });
 
-// ── 5. Парсинг JSON c ограничением размера ──────────────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 5) Ограничение размера JSON                                     */
 app.use(express.json({ limit: '10kb' }));
 
-// ── 6. Rate-limit для /validate и /validate-final ───────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 6) Rate-limit для /api/validate и /api/validate-final           */
 const validateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,  // 15 минут
-  max: 30,
+  windowMs:    15 * 60 * 1000, // 15 минут
+  max:         30,
   standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many requests, please try later.' }
+  legacyHeaders:   false,
+  message:     { error: 'Too many requests, please try later.' }
 });
 app.use('/api/validate',       validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-// ── 7. Proxy-auth для всех остальных /api ───────────────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 7) «Проксируем» /api — публичные и защищённые маршруты          */
 app.use('/api', (req, res, next) => {
   const { method, path } = req;
 
-  // Allow preflight
+  // OPTIONS всегда разрешены
   if (method === 'OPTIONS') return next();
-
-  // Allow public registration
+  // POST /api/init – публичный маршрут регистрации
   if (method === 'POST' && path === '/init') return next();
-
-  // Allow public profile fetch
+  // GET /api/player/:tg_id – публичный (чтение профиля)
   if (method === 'GET' && /^\/player\/[^/]+$/.test(path)) return next();
 
-  // Everything else requires JWT auth
+  // всё остальное — через JWT-аутентификацию
   return authenticate(req, res, next);
 });
 
-// ── 8. Игровые маршруты ─────────────────────────────────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 8) Игровые маршруты */
 app.use('/api', playerRoutes);
 
-// ── 9. Запуск сервера ───────────────────────────────────────────
+/* ──────────────────────────────────────────────────────────────── */
+/* 9) Запуск сервера на порту из env.PORT, слушаем 0.0.0.0         */
 const PORT = process.env.PORT;
 if (!PORT) {
   console.error(
     '❌  $PORT env variable is not set! ' +
-    'Railway assigns it automatically — do not override it.'
+    'Railway назначает его автоматически, не переопределяйте.'
   );
   process.exit(1);
 }
