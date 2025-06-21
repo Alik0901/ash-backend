@@ -1,4 +1,7 @@
-// index.js — полный файл сервера с debug-логами и тестовым endpoint
+// index.js — полный файл сервера с отключённой проверкой сертификата, debug-логами и тестовым endpoint
+
+// 0) Отключаем проверку самоподписанных сертификатов
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import dotenv from 'dotenv';
 if (process.env.NODE_ENV !== 'production') {
@@ -13,8 +16,8 @@ import helmet         from 'helmet';
 import cors           from 'cors';
 import rateLimit      from 'express-rate-limit';
 
-import pool           from './db.js';                   // PG Pool
-import './worker/check-payments.js';                   // старт воркера
+import pool           from './db.js';                   // подключаем пул из db.js
+import './worker/check-payments.js';                   // стартуем воркер
 import validateRoute      from './routes/validate.js';
 import validateFinalRoute from './routes/validateFinal.js';
 import playerRoutes       from './routes/player.js';
@@ -25,19 +28,17 @@ const app = express();
 /* 1) Безопасные HTTP-заголовки */
 app.use(helmet());
 
-/* 2) CORS: лишь ваш фронт и любые поддомены telegram.org */
+/* 2) CORS: разрешаем запросы лишь с вашего фронта и любых поддоменов telegram.org */
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/
 ];
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // curl, Postman
+    if (!origin) return callback(null, true); // curl, Postman и другие non-browser
     if (ALLOWED.some(o =>
       typeof o === 'string' ? o === origin : o.test(origin)
-    )) {
-      return callback(null, true);
-    }
+    )) return callback(null, true);
     return callback(new Error(`CORS blocked for origin ${origin}`));
   },
   methods: ['GET','POST','OPTIONS'],
@@ -45,7 +46,7 @@ app.use(cors({
 }));
 app.options('*', cors());
 
-/* 3) Health-check для Railway (root должен вернуть 200) */
+/* 3) Health-check корня для Railway */
 app.get('/', (_req, res) => {
   res.sendStatus(200);
 });
@@ -61,17 +62,17 @@ app.get('/test-db', async (_req, res) => {
   }
 });
 
-/* 4) Отключаем ETag, запрещаем кэширование для /api */
+/* 4) Отключаем ETag и запрещаем кэширование для /api */
 app.disable('etag');
 app.use('/api', (_req, res, next) => {
   res.set('Cache-Control','no-store');
   next();
 });
 
-/* 5) Ограничение размера JSON */
+/* 5) Ограничиваем размер JSON-тела */
 app.use(express.json({ limit: '10kb' }));
 
-/* 6) Rate-limit для validate */
+/* 6) Rate-limit для маршрутов валидации */
 const validateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 минут
   max: 30,
@@ -82,7 +83,7 @@ const validateLimiter = rateLimit({
 app.use('/api/validate',       validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-/* 7) Публичные и защищённые маршруты */
+/* 7) Прокси для публичных и защищённых API-маршрутов */
 app.use('/api', (req, res, next) => {
   const { method, path } = req;
   if (method === 'OPTIONS') return next();
@@ -91,15 +92,13 @@ app.use('/api', (req, res, next) => {
   return authenticate(req, res, next);
 });
 
-/* 8) Игровые /api-маршруты */
+/* 8) Основные игровые маршруты */
 app.use('/api', playerRoutes);
 
-/* 9) Запуск сервера */
+/* 9) Запуск сервера на порту из env.PORT */
 const PORT = process.env.PORT;
 if (!PORT) {
-  console.error(
-    '❌ $PORT не задан! Railway назначает его автоматически.'
-  );
+  console.error('❌ $PORT env variable is not set! Railway назначает его автоматически.');
   process.exit(1);
 }
 app.listen(PORT, '0.0.0.0', () => {
