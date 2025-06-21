@@ -2,7 +2,7 @@
 // Должен быть загружен первым в процессе, до любых попыток подключения к БД
 
 // 1) Отключаем проверку корневых сертификатов (Node.js)
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0;
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import dotenv from 'dotenv';
 dotenv.config();
