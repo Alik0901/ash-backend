@@ -1,29 +1,43 @@
-// db.js ── PostgreSQL pool (подключение + логгирование)
+// db.js ── PostgreSQL pool (с пред-подключением и подробными логами)
 
 import pg from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Показываем, какую строку коннекта получили из env
+// Покажем, откуда берем DATABASE_URL
 console.log('ℹ️  ENV DATABASE_URL =', process.env.DATABASE_URL);
 
 const { Pool } = pg;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    // отключаем проверку цепочки сертификатов Railway-прокси
-    rejectUnauthorized: false
-  },
-  max: 5,               // <= pool size
+  // Если вы подключаетесь по приватному хосту — SSL не нужен,
+  // иначе отключаем проверку цепочки (Railway-прокси даёт самоподписанный).
+  ssl: process.env.DATABASE_URL.includes('railway.internal')
+       ? false
+       : { rejectUnauthorized: false },
+  max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
 });
 
-// Логируем неожиданные ошибки клиента
-pool.on('error', (err, client) => {
-  console.error('❌ Unexpected PG client error:', err.code, err.message);
+// Отслеживаем любые ошибки пула
+pool.on('error', (err) => {
+  console.error('❌ PG pool error:', err.code, err.message);
 });
+
+// Пытаемся подключиться немедленно — чтобы поймать ошибку на старте
+;(async () => {
+  try {
+    const client = await pool.connect();
+    console.log('✅ PG initial connection successful');
+    client.release();
+  } catch (err) {
+    console.error('❌ PG initial connection failed:', err.code, err.message);
+    // Если хотите — можно аварийно завершить процесс:
+    // process.exit(1);
+  }
+})();
 
 export default pool;
