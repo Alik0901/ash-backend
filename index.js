@@ -75,11 +75,13 @@ app.use('/api', (req, res, next) => {
 
 app.use('/api', playerRoutes);
 
-const PORT = Number(process.env.PORT);
-if (!PORT) {
-  console.error('❌ $PORT is not defined!');
-  process.exit(1);
-}
+const portFromEnv = parseInt(process.env.PORT, 10);
+const PORT = Number.isInteger(portFromEnv) ? portFromEnv : 8080;
+console.log('▶️ [index.js] Using port', PORT);
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🟢 Server is listening on port ${PORT}`);
+});
 console.log('▶️ ENV PORT =', PORT);
 
 app.listen(PORT, '0.0.0.0', () => {
