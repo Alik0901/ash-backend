@@ -1,30 +1,56 @@
-// db.js
-import pg     from 'pg';
+// db.js — Postgres Pool
+import pg from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Логи ENV, относящихся к PG
-console.log('▶️ [db.js] ENV.DATABASE_URL =', process.env.DATABASE_URL);
-console.log('▶️ [db.js] ENV.PGHOST       =', process.env.PGHOST);
-console.log('▶️ [db.js] ENV.PGPORT       =', process.env.PGPORT);
-console.log('▶️ [db.js] ENV.PGSSLMODE    =', process.env.PGSSLMODE);
+const {
+  PGHOST,
+  PGPORT,
+  PGDATABASE,
+  PGUSER,
+  PGPASSWORD,
+  PGSSLMODE,
+  DATABASE_URL
+} = process.env;
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSLMODE === 'require'
-       ? { rejectUnauthorized: false }
-       : false,
-  max: 5,
-  idleTimeoutMillis:      30000,
-  connectionTimeoutMillis:5000,
-});
+// Логи окружения для PG
+console.log('▶️ [db.js] PGHOST      =', PGHOST);
+console.log('▶️ [db.js] PGPORT      =', PGPORT);
+console.log('▶️ [db.js] PGDATABASE  =', PGDATABASE);
+console.log('▶️ [db.js] PGUSER      =', PGUSER);
+console.log('▶️ [db.js] PGPASSWORD  =', PGPASSWORD ? '***' : undefined);
+console.log('▶️ [db.js] PGSSLMODE   =', PGSSLMODE);
+console.log('▶️ [db.js] DATABASE_URL=', DATABASE_URL);
 
-console.log('▶️ [db.js] Pool config      =', {
-  connectionString: pool.options.connectionString,
-  ssl:               pool.options.ssl,
-  max:               pool.options.max,
-});
+// Формируем конфиг для Pool
+const poolConfig = PGHOST
+  ? {
+      host:     PGHOST,
+      port:     Number(PGPORT || 5432),
+      database: PGDATABASE,
+      user:     PGUSER,
+      password: PGPASSWORD,
+      ssl:      PGSSLMODE === 'require'
+                 ? { rejectUnauthorized: false }
+                 : false,
+      max:      5,
+      idleTimeoutMillis:     30000,
+      connectionTimeoutMillis: 5000
+    }
+  : {
+      connectionString: DATABASE_URL,
+      ssl: PGSSLMODE === 'require'
+           ? { rejectUnauthorized: false }
+           : false,
+      max: 5,
+      idleTimeoutMillis:     30000,
+      connectionTimeoutMillis: 5000
+    };
+
+console.log('▶️ [db.js] Pool config =', poolConfig);
+
+const pool = new pg.Pool(poolConfig);
 
 pool.on('error', err => {
   console.error('🔥 Unexpected PG client error', err);
