@@ -5,9 +5,10 @@ import cors           from 'cors';
 import rateLimit      from 'express-rate-limit';
 import dotenv         from 'dotenv';
 
-// воркер проверки платежей
+// Запускаем воркер проверки платежей
 import './worker/check-payments.js';
 
+// Роуты и middleware
 import validateRoute      from './routes/validate.js';
 import validateFinalRoute from './routes/validateFinal.js';
 import playerRoutes       from './routes/player.js';
@@ -28,14 +29,19 @@ app.use(helmet());
 /* 2) CORS: разрешаем запросы только с вашего фронта и Telegram   */
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
-  'https://web.telegram.org'
+  /\.telegram\.org$/  // любой поддомен telegram.org
 ];
 
 app.use(cors({
   origin: (origin, callback) => {
     // не-браузерные клиенты (curl, Postman) пропускаем
     if (!origin) return callback(null, true);
-    if (ALLOWED.includes(origin)) return callback(null, true);
+    // совпадение строки или regexp
+    if (ALLOWED.some(o =>
+      typeof o === 'string' ? o === origin : o.test(origin)
+    )) {
+      return callback(null, true);
+    }
     return callback(new Error(`CORS blocked for origin ${origin}`));
   },
   methods: ['GET','POST','OPTIONS'],
