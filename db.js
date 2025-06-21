@@ -1,23 +1,18 @@
-// db.js ── PostgreSQL pool (подключение не менялось)
+// db.js — упрощённая версия с connectionString и SSL
 import pg from 'pg';
 import dotenv from 'dotenv';
-
 dotenv.config();
 
 const { Pool } = pg;
 
 const pool = new Pool({
-  host: process.env.PGHOST,
-  port: Number(process.env.PGPORT),
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  database: process.env.PGDATABASE,
-  ssl: process.env.PGSSLMODE === 'require'
-       ? { rejectUnauthorized: false }
-       : false,
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  },
   max: 5,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
   keepAlive: true
 });
 
