@@ -1,43 +1,38 @@
-// db.js ── PostgreSQL pool (с пред-подключением и подробными логами)
+// db.js ── PostgreSQL pool
 
 import pg from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Покажем, откуда берем DATABASE_URL
-console.log('ℹ️  ENV DATABASE_URL =', process.env.DATABASE_URL);
-
 const { Pool } = pg;
+
+// Выведем все переменные, относящиеся к PG
+console.log('▶️ [db.js] ENV PORT         =', process.env.PORT);
+console.log('▶️ [db.js] ENV DATABASE_URL =', process.env.DATABASE_URL);
+console.log('▶️ [db.js] ENV PGHOST       =', process.env.PGHOST);
+console.log('▶️ [db.js] ENV PGPORT       =', process.env.PGPORT);
+console.log('▶️ [db.js] ENV PGDATABASE   =', process.env.PGDATABASE);
+console.log('▶️ [db.js] ENV PGUSER       =', process.env.PGUSER);
+console.log('▶️ [db.js] ENV PGPASSWORD   =', process.env.PGPASSWORD);
+console.log('▶️ [db.js] ENV PGSSLMODE    =', process.env.PGSSLMODE);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Если вы подключаетесь по приватному хосту — SSL не нужен,
-  // иначе отключаем проверку цепочки (Railway-прокси даёт самоподписанный).
-  ssl: process.env.DATABASE_URL.includes('railway.internal')
-       ? false
-       : { rejectUnauthorized: false },
+  ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : false,
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
 });
 
-// Отслеживаем любые ошибки пула
-pool.on('error', (err) => {
-  console.error('❌ PG pool error:', err.code, err.message);
+console.log('▶️ [db.js] Pool config      =', {
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSLMODE,
+  max: pool.options.max,
 });
 
-// Пытаемся подключиться немедленно — чтобы поймать ошибку на старте
-;(async () => {
-  try {
-    const client = await pool.connect();
-    console.log('✅ PG initial connection successful');
-    client.release();
-  } catch (err) {
-    console.error('❌ PG initial connection failed:', err.code, err.message);
-    // Если хотите — можно аварийно завершить процесс:
-    // process.exit(1);
-  }
-})();
+pool.on('error', err => {
+  console.error('🔥 Unexpected PG client error', err);
+});
 
 export default pool;
