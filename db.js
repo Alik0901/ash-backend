@@ -1,35 +1,29 @@
-// db.js — PostgreSQL pool с отключённой проверкой сертификата
-// Должен быть загружен первым в процессе, до любых попыток подключения к БД
+// db.js ── PostgreSQL pool (подключение + логгирование)
 
-// 1) Отключаем проверку корневых сертификатов (Node.js)
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
+import pg from 'pg';
 import dotenv from 'dotenv';
+
 dotenv.config();
 
-import { Pool } from 'pg';
-import { parse } from 'pg-connection-string';
+// Показываем, какую строку коннекта получили из env
+console.log('ℹ️  ENV DATABASE_URL =', process.env.DATABASE_URL);
 
-// 2) Парсим DATABASE_URL в отдельные параметры
-const config = parse(process.env.DATABASE_URL);
+const { Pool } = pg;
 
-// 3) Включаем SSL без проверки цепочки
-config.ssl = { rejectUnauthorized: false };
-
-// 4) Создаём пул
 const pool = new Pool({
-  ...config,
-  max: 5,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
-  keepAlive: true
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    // отключаем проверку цепочки сертификатов Railway-прокси
+    rejectUnauthorized: false
+  },
+  max: 5,               // <= pool size
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
-// 5) Обработка неожиданных ошибок на idle-клиентах
-pool.on('error', err => {
-  console.error('Unexpected PG client error', err);
-  // при желании можно process.exit(1) тут вызывать,
-  // чтобы контейнер перезапустился
+// Логируем неожиданные ошибки клиента
+pool.on('error', (err, client) => {
+  console.error('❌ Unexpected PG client error:', err.code, err.message);
 });
 
 export default pool;
