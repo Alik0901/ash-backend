@@ -1,7 +1,6 @@
-// worker/check-payments.js – периодически проверяет входящие TON-транзакции
-// и помечает счета как оплаченные (+ подтверждает рефералов)
+// worker/check-payments.js ── Payment Checker
 import 'dotenv/config.js';
-import fetch  from 'node-fetch';
+import fetch from 'node-fetch';
 import pool   from '../db.js';
 import { setTimeout as wait } from 'timers/promises';
 
@@ -13,71 +12,90 @@ const {
   CHECK_INTERVAL_SEC : INTERVAL = 30
 } = process.env;
 
-/* ── helpers ─────────────────────────────────────────────────────────── */
+/* ── Helpers ────────────────────────────────────────────────────────── */
 const b64urlDecode = str => {
   if (!str) return undefined;
   try   { return Buffer.from(str, 'base64url').toString('utf-8'); }
   catch { return str; }
 };
-const log = (...a) => console.log(...a);
+const log = (...args) => console.log(...args);
 
-/* ── основной цикл ───────────────────────────────────────────────────── */
+/* ── Main Loop ──────────────────────────────────────────────────────── */
 async function checkLoop() {
   log(`🚀 payment-checker started (every ${INTERVAL}s)`);
+
+  // Одиночный клиент вместо pool.query()
+  const client = await pool.connect();
+  client.on('error', err => {
+    console.error('❌ Fatal PG client error in worker:', err);
+    // Принудительно выходим, чтобы Railway автоматически перезапустил сервис
+    process.exit(1);
+  });
+
   while (true) {
     try {
-      /* 1. все pending-инвойсы */
-      const { rows: pend } = await pool.query(
-        `SELECT invoice_id, tg_id, comment
-           FROM burn_invoices
-          WHERE status = 'pending'`
-      );
-      if (!pend.length) {
-        await wait(INTERVAL * 1_000);
+      /* 1. выберем все pending-инвойсы */
+      const { rows: pending } = await client.query(`
+        SELECT invoice_id, tg_id, comment
+          FROM burn_invoices
+         WHERE status = 'pending'
+      `);
+
+      if (pending.length === 0) {
+        await wait(INTERVAL * 1000);
         continue;
       }
 
-      /* 2. берём последние входящие tx */
+      /* 2. получить последние входящие транзакции */
       const url  = `${ENDPOINT}/getTransactions?address=${ADDRESS}&limit=40&decode=true`;
       const hdrs = API_KEY ? { 'X-API-Key': API_KEY } : {};
-      const txs  = (await (await fetch(url, { headers: hdrs })).json()).result ?? [];
+      const resp = await fetch(url, { headers: hdrs });
+      const data = await resp.json();
+      const txs  = data.result ?? [];
 
-      const decoded = txs.map(t => ({
-        nano: Number(t.in_msg?.value ?? 0),
-        text: b64urlDecode(t.in_msg?.msg_data?.text)
-      })).filter(d => d.text);
+      const decoded = txs
+        .map(t => ({
+          nano: Number(t.in_msg?.value ?? 0),
+          text: b64urlDecode(t.in_msg?.msg_data?.text)
+        }))
+        .filter(d => d.text);
 
-      /* 3. пытаемся матчить каждый invoice-comment */
-      for (const inv of pend) {
-        const okTx = decoded.find(d =>
-          d.text === inv.comment && d.nano >= 500_000_000 /* 0.5 TON */);
-
-        if (!okTx) continue;
-
-        /* 3.1 помечаем счёт оплаченным */
-        await pool.query(
-          `UPDATE burn_invoices
-              SET status = 'paid', paid_at = NOW()
-            WHERE invoice_id = $1`,
-          [inv.invoice_id]
+      /* 3. пробегаем по каждому pending-инвойсу */
+      for (const inv of pending) {
+        const match = decoded.find(d =>
+          d.text === inv.comment && d.nano >= 500_000_000
         );
+        if (!match) continue;
+
+        /* 3.1 отмечаем счёт как оплаченный */
+        await client.query(`
+          UPDATE burn_invoices
+             SET status = 'paid',
+                 paid_at = NOW()
+           WHERE invoice_id = $1
+        `, [inv.invoice_id]);
         log('✅ invoice paid', inv.invoice_id);
 
-        /* 3.2 сразу переводим pending-рефералов → confirmed */
-        await pool.query(
-          `UPDATE referrals
-              SET status = 'confirmed', updated_at = NOW()
-            WHERE referred_id = $1 AND status = 'pending'`,
-          [inv.tg_id]
-        );
+        /* 3.2 подтверждаем связанные рефералы */
+        await client.query(`
+          UPDATE referrals
+             SET status     = 'confirmed',
+                 updated_at = NOW()
+           WHERE referred_id = $1
+             AND status = 'pending'
+        `, [inv.tg_id]);
       }
-    } catch (e) {
-      console.error('🔥 payment-checker error:', e);
+    } catch (err) {
+      console.error('🔥 payment-checker loop error:', err);
     }
 
-    await wait(INTERVAL * 1_000);
+    // Ждём заданный интервал перед следующей итерацией
+    await wait(INTERVAL * 1000);
   }
 }
 
-/* ── старт ───────────────────────────────────────────────────────────── */
-checkLoop();
+// Запускаем
+checkLoop().catch(err => {
+  console.error('🔥 payment-checker startup error:', err);
+  process.exit(1);
+});
