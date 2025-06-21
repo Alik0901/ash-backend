@@ -30,7 +30,7 @@ app.use(helmet());
 
 /* 2) CORS: разрешаем запросы лишь с вашего фронта и любых поддоменов telegram.org */
 const ALLOWED = [
-  '*',
+  'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/
 ];
 app.use(cors({
