@@ -14,7 +14,7 @@ const { JWT_SECRET, TON_WALLET_ADDRESS: TON_ADDR } = process.env;
 // ── CONSTANTS ─────────────────────────────────────────────
 const TONHUB_URL      = 'https://tonhub.com/transfer';
 const TONSPACE_SCHEME = 'ton://transfer';
-const AMOUNT_NANO     = 500_000_000;    // 0.5 TON in nano
+const AMOUNT_NANO     = 500_000_000;    // 0.5 TON в nano
 const FRAGS           = [1,2,3,4,5,6,7,8];
 
 // ── HELPERS ───────────────────────────────────────────────
@@ -31,7 +31,7 @@ function randRef() {
 
 // ╔════════════════ PUBLIC ══════════════════════════════
 
-// ► GET /api/player/:tg_id — профиль + count confirmed referrals
+// ► GET /api/player/:tg_id — профиль + число подтверждённых рефералов
 router.get('/player/:tg_id', async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -64,7 +64,7 @@ router.get('/player/:tg_id', async (req, res) => {
   }
 });
 
-// ► POST /api/init — регистрация + optional referrer_code → pending referral
+// ► POST /api/init — регистрация + pending-referral
 router.post('/init', async (req, res) => {
   const { tg_id, name = '', initData = '', referrer_code = null } = req.body;
   if (!tg_id || !initData) {
@@ -78,13 +78,11 @@ router.post('/init', async (req, res) => {
     );
 
     if (!rows.length) {
-      // new player
+      // создаём нового игрока
       const myCode = await genUniqueCode();
       const client = await pool.connect();
-
       try {
         await client.query('BEGIN');
-
         const { rows: [me] } = await client.query(
           `INSERT INTO players
              (tg_id, name, is_cursed, curses_count, curse_expires,
@@ -95,11 +93,8 @@ router.post('/init', async (req, res) => {
         );
 
         if (referrer_code) {
-          // register a pending referral
           const { rows: [ref] } = await client.query(
-            `SELECT tg_id FROM players
-               WHERE ref_code = $1
-               LIMIT 1`,
+            `SELECT tg_id FROM players WHERE ref_code = $1 LIMIT 1`,
             [referrer_code.trim()]
           );
           if (!ref) {
@@ -107,8 +102,7 @@ router.post('/init', async (req, res) => {
             return res.status(400).json({ error: 'Invalid referral code' });
           }
           await client.query(
-            `INSERT INTO referrals
-               (referrer_id, referred_id, status)
+            `INSERT INTO referrals (referrer_id, referred_id, status)
              VALUES ($1,$2,'pending')`,
             [ref.tg_id, tg_id]
           );
@@ -132,12 +126,12 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// apply JWT middleware to all routes below
+// все маршруты ниже — только для авторизованных
 router.use(authenticate);
 
 // ╔════════════════ PROTECTED ════════════════════════════
 
-// ► POST /api/burn-invoice — создать TON-счет
+// ► POST /api/burn-invoice — создаём счёт для burn
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
   if (!tg_id) {
@@ -147,7 +141,6 @@ router.post('/burn-invoice', async (req, res) => {
   try {
     const invoiceId = uuid();
     const comment   = crypto.randomBytes(4).toString('hex');
-
     await pool.query(
       `INSERT INTO burn_invoices
          (invoice_id, tg_id, amount_nano, address, comment, status, created_at)
@@ -167,7 +160,7 @@ router.post('/burn-invoice', async (req, res) => {
   }
 });
 
-// ► GET /api/burn-status/:invoiceId — проверить факт оплаты и выдать фрагмент
+// ► GET /api/burn-status/:invoiceId — проверяем оплату и выдаём фрагмент
 router.get('/burn-status/:invoiceId', async (req, res) => {
   try {
     const { rows: [inv] } = await pool.query(
@@ -189,7 +182,7 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
   }
 });
 
-// ► GET /api/fragments/:tg_id — список фрагментов игрока
+// ► GET /api/fragments/:tg_id — возвращаем массив фрагментов
 router.get('/fragments/:tg_id', async (req, res) => {
   try {
     const { rows: [p] } = await pool.query(
@@ -206,7 +199,7 @@ router.get('/fragments/:tg_id', async (req, res) => {
   }
 });
 
-// ► GET /api/stats/total_users — общее число зарегистрированных
+// ► GET /api/stats/total_users — общее число игроков
 router.get('/stats/total_users', async (_req, res) => {
   try {
     const { rows: [r] } = await pool.query(
@@ -219,12 +212,11 @@ router.get('/stats/total_users', async (_req, res) => {
   }
 });
 
-// ► GET /api/referral/:tg_id — данные по реферальной программе
+// ► GET /api/referral/:tg_id — сводка по рефералам
 router.get('/referral/:tg_id', async (req, res) => {
   if (String(req.user.tg_id) !== req.params.tg_id) {
     return res.status(403).json({ error: 'Forbidden' });
   }
-
   try {
     const { rows: [p] } = await pool.query(
       `SELECT ref_code, referral_reward_issued
@@ -267,7 +259,6 @@ router.post('/referral/claim', async (req, res) => {
   }
 
   try {
-    // 1) load player
     const { rows } = await pool.query(
       `SELECT fragments, referral_reward_issued
          FROM players WHERE tg_id = $1`,
@@ -277,13 +268,10 @@ router.post('/referral/claim', async (req, res) => {
       return res.status(404).json({ error: 'Player not found' });
     }
     const p = rows[0];
-
-    // 2) already claimed?
     if (p.referral_reward_issued) {
       return res.status(400).json({ error: 'Reward already claimed' });
     }
 
-    // 3) count confirmed referrals
     const { rows: [c] } = await pool.query(
       `SELECT COUNT(*) AS cnt
          FROM referrals
@@ -295,14 +283,12 @@ router.post('/referral/claim', async (req, res) => {
       return res.status(400).json({ error: 'Not enough invited users' });
     }
 
-    // 4) pick a fragment
     const owned     = p.fragments || [];
     const available = FRAGS.filter(f => !owned.includes(f));
     const pick      = available.length
                       ? available[crypto.randomInt(available.length)]
                       : null;
 
-    // 5) update with explicit cast ::int
     await pool.query(
       `UPDATE players
          SET fragments              = CASE
@@ -322,7 +308,7 @@ router.post('/referral/claim', async (req, res) => {
   }
 });
 
-// ► DELETE /api/player/:tg_id — удалить всё в рамках транзакции
+// ► DELETE /api/player/:tg_id — полная очистка профиля
 router.delete('/player/:tg_id', async (req, res) => {
   if (String(req.user.tg_id) !== req.params.tg_id) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -331,18 +317,15 @@ router.delete('/player/:tg_id', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // referrals
     await client.query(
       `DELETE FROM referrals
          WHERE referrer_id = $1 OR referred_id = $1`,
       [req.user.tg_id]
     );
-    // burn invoices
     await client.query(
       `DELETE FROM burn_invoices WHERE tg_id = $1`,
       [req.user.tg_id]
     );
-    // player record
     await client.query(
       `DELETE FROM players WHERE tg_id = $1`,
       [req.user.tg_id]
@@ -358,13 +341,12 @@ router.delete('/player/:tg_id', async (req, res) => {
   }
 });
 
-// ── BUSINESS LOGIC: runBurnLogic ─────────────────────────
+// ── BUSINESS LOGIC ───────────────────────────────────────
 async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) lock invoice
     const { rows: [inv] } = await client.query(
       `SELECT tg_id, processed
          FROM burn_invoices
@@ -378,7 +360,6 @@ async function runBurnLogic(invoiceId) {
       return { newFragment: null, cursed: false, curse_expires: null };
     }
 
-    // 2) lock player fragments
     const { rows: [pl] } = await client.query(
       `SELECT fragments FROM players
         WHERE tg_id = $1
@@ -391,25 +372,21 @@ async function runBurnLogic(invoiceId) {
                       ? available[crypto.randomInt(available.length)]
                       : null;
 
-    // 3) update player
     if (pick === null) {
       await client.query(
-        `UPDATE players
-            SET last_burn = NOW()
-          WHERE tg_id = $1`,
+        `UPDATE players SET last_burn = NOW() WHERE tg_id = $1`,
         [inv.tg_id]
       );
     } else {
       await client.query(
         `UPDATE players
-            SET fragments  = array_append(fragments, $2::int),
-                last_burn  = NOW()
+            SET fragments = array_append(fragments, $2::int),
+                last_burn = NOW()
           WHERE tg_id = $1`,
         [inv.tg_id, pick]
       );
     }
 
-    // 4) mark invoice processed
     await client.query(
       `UPDATE burn_invoices
           SET processed = TRUE
