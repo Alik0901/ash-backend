@@ -181,13 +181,11 @@ router.get('/referral/:tg_id', async (req,res)=>{
 /* ── runBurnLogic ────────────────────────────────────────── */
 async function runBurnLogic (invoiceId) {
   const client = await pool.connect();
-
   try {
     await client.query('BEGIN');
 
-    /* 1. Берём счёт, фиксируем строку (FOR UPDATE).
-          Обрабатываем только unpaid-→paid и ещё не processed. */
-    const { rows: [inv] } = await client.query(
+    /* 1. счёт */
+    const { rows:[inv] } = await client.query(
       `SELECT tg_id, processed
          FROM burn_invoices
         WHERE invoice_id = $1
@@ -195,55 +193,53 @@ async function runBurnLogic (invoiceId) {
         FOR UPDATE`,
       [invoiceId]
     );
-
-    if (!inv || inv.processed) {                // уже обработан или не найден
+    if (!inv || inv.processed) {
       await client.query('ROLLBACK');
-      return { newFragment: null, cursed: false, curse_expires: null };
+      return { newFragment:null, cursed:false, curse_expires:null };
     }
 
-    /* 2. Читаем игрока, решаем какой фрагмент выдать */
-    const { rows: [pl] } = await client.query(
-      `SELECT fragments
-         FROM players
-        WHERE tg_id = $1
-        FOR UPDATE`,
+    /* 2. выбираем фрагмент */
+    const { rows:[pl] } = await client.query(
+      `SELECT fragments FROM players WHERE tg_id = $1 FOR UPDATE`,
       [inv.tg_id]
     );
-
     const owned     = pl.fragments ?? [];
     const available = FRAGS.filter(f => !owned.includes(f));
     const pick      = available.length
                         ? available[crypto.randomInt(available.length)]
-                        : null;                    // могут закончиться
+                        : null;
 
-    /* 3. Обновляем игрока + помечаем счёт processed */
-    await client.query(
-      `UPDATE players
-         SET fragments = CASE
-                           WHEN $2 IS NULL       -- нет свободных фрагментов
-                             THEN fragments
-                           ELSE array_append(fragments, $2::int)
-                         END,
-             last_burn = NOW()
-       WHERE tg_id = $1`,
-      [inv.tg_id, pick]                          // ::int важно, иначе 42P08
-    );
+    /* 3. обновляем игрока */
+    if (pick === null) {
+      await client.query(
+        `UPDATE players
+            SET last_burn = NOW()
+          WHERE tg_id = $1`,
+        [inv.tg_id]
+      );
+    } else {
+      await client.query(
+        `UPDATE players
+            SET fragments = array_append(fragments, $2::int),
+                last_burn = NOW()
+          WHERE tg_id = $1`,
+        [inv.tg_id, pick]
+      );
+    }
 
+    /* 4. помечаем счёт processed */
     await client.query(
-      `UPDATE burn_invoices
-          SET processed = TRUE
-        WHERE invoice_id = $1`,
+      `UPDATE burn_invoices SET processed = TRUE WHERE invoice_id = $1`,
       [invoiceId]
     );
 
     await client.query('COMMIT');
-    return { newFragment: pick, cursed: false, curse_expires: null };
+    return { newFragment: pick, cursed:false, curse_expires:null };
 
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[runBurnLogic]', err);
     throw err;
-
   } finally {
     client.release();
   }
