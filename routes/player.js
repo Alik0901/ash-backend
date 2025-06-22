@@ -184,18 +184,28 @@ router.post('/burn-invoice', async (req, res) => {
 });
 
 /* ► GET /api/burn-status/:invoiceId — статус счёта */
+/* ► статус счёта */
 router.get('/burn-status/:invoiceId?', async (req, res) => {
   const id = req.params.invoiceId;
-  if (!id) return res.status(400).json({ error: 'invoiceId required' });
+  if (!id)
+    return res.status(400).json({ error: 'invoiceId required' });
 
   try {
     const { rows:[inv] } = await pool.query(
-      `SELECT status, paid_at FROM burn_invoices WHERE invoice_id=$1`, [id]);
-    if (!inv) return res.status(404).json({ error: 'invoice not found' });
+      `SELECT status FROM burn_invoices WHERE invoice_id=$1`,
+      [id]
+    );
+    if (!inv)
+      return res.status(404).json({ error: 'invoice not found' });
 
-    const paid = inv.status === 'paid';
-    // Заглушки для фронта — доработайте при нужде
-    res.json({ paid, cursed: false, newFragment: null, curse_expires: null });
+    /* ещё не оплачено */
+    if (inv.status !== 'paid')
+      return res.json({ paid: false });
+
+    /* оплачено — запускаем бизнес-логику (фрагмент/curse) */
+    const result = await runBurnLogic(id);   // { newFragment, cursed, … }
+    return res.json({ paid: true, ...result });
+
   } catch (e) {
     console.error('[burn-status] ', e);
     res.status(500).json({ error: 'internal error' });
@@ -309,8 +319,65 @@ router.get('/stats/total_users', async (req,res)=>{/* unchanged */});
 router.post('/burn-invoice', async (req,res)=>{/* unchanged */});
 router.get('/burn-status/:invoiceId?', async (req,res)=>{/* unchanged */});
 
+/* ——— runBurnLogic ——— */
 async function runBurnLogic(invoiceId) {
-  /* TODO: начислить фрагмент, обновить curse и т.д. */
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    /* 1. выбираем счёт — только paid и ещё не processed */
+    const { rows:[inv] } = await client.query(
+      `SELECT tg_id, processed
+         FROM burn_invoices
+        WHERE invoice_id=$1
+          AND status='paid'
+        FOR UPDATE`,
+      [invoiceId]
+    );
+    if (!inv || inv.processed) {            // счёт уже обработан
+      await client.query('ROLLBACK');
+      return { newFragment: null, cursed: false, curse_expires: null };
+    }
+
+    /* 2. выбираем игрока и решаем, какой фрагмент дать */
+    const { rows:[pl] } = await client.query(
+      `SELECT fragments FROM players WHERE tg_id=$1 FOR UPDATE`,
+      [inv.tg_id]
+    );
+    const owned      = pl.fragments || [];
+    const available  = FRAGS.filter(f => !owned.includes(f));
+    const pick       = available.length
+                       ? available[crypto.randomInt(available.length)]
+                       : null;
+
+    /* 3. обновляем игрока и помечаем счёт processed */
+    await client.query(
+      `UPDATE players
+         SET fragments = CASE
+                           WHEN $2 IS NULL THEN fragments
+                           ELSE array_append(fragments,$2)
+                         END,
+             last_burn = NOW()
+       WHERE tg_id=$1`,
+      [inv.tg_id, pick]
+    );
+
+    await client.query(
+      `UPDATE burn_invoices
+          SET processed = TRUE
+        WHERE invoice_id=$1`,
+      [invoiceId]
+    );
+
+    await client.query('COMMIT');
+    return { newFragment: pick, cursed: false, curse_expires: null };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[runBurnLogic] ', e);
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 /* ────────────────────────────────────────────────────────────────── */
 async function generateUniqueCode() {
