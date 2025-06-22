@@ -42,7 +42,7 @@ app.use(cors({
       return cb(null, true);
     return cb(new Error(`CORS blocked: ${o}`));
   },
-  methods: ['GET','POST','OPTIONS'],
+  methods: ['GET','POST','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
 app.options('*', cors());
