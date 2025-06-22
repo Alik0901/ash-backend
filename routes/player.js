@@ -239,61 +239,71 @@ router.get('/referral/:tg_id', async (req, res) => {
   }
 });  
 
-router.post('/referral/claim', async (req, res) => {
-  // аутентификация уже прокинутой: req.user
+router.post('/referral/claim', authenticate, async (req, res) => {
   const tg_id = req.user.tg_id;
+  console.log('[referral claim] start for', tg_id);
 
   try {
-    // 1) проверяем, не брали ли уже
-    const { rows: [p] } = await pool.query(
+    // 1) Забираем игрока
+    const playerRes = await pool.query(
       `SELECT fragments, referral_reward_issued
          FROM players
         WHERE tg_id = $1`,
       [tg_id]
     );
-    if (!p) {
+    if (playerRes.rows.length === 0) {
+      console.warn('[referral claim] player not found:', tg_id);
       return res.status(404).json({ error: 'Player not found' });
     }
+    const p = playerRes.rows[0];
+    console.log('[referral claim] player row', p);
+
     if (p.referral_reward_issued) {
       return res.status(400).json({ error: 'Reward already claimed' });
     }
 
-    // 2) считаем подтверждённых рефералов
-    const { rows: [{ count }] } = await pool.query(
-      `SELECT COUNT(*) FROM referrals
-         WHERE referrer_id = $1
-           AND status = 'confirmed'`,
+    // 2) Считаем confirmed referrals
+    const confRes = await pool.query(
+      `SELECT COUNT(*) AS cnt
+         FROM referrals
+        WHERE referrer_id = $1
+          AND status       = 'confirmed'`,
       [tg_id]
     );
-    if (Number(count) < 3) {
+    const confirmed = Number(confRes.rows[0].cnt);
+    console.log('[referral claim] confirmed count', confirmed);
+
+    if (confirmed < 3) {
       return res.status(400).json({ error: 'Not enough invited users' });
     }
 
-    // 3) выбираем свободный фрагмент
+    // 3) Выбираем свободный фрагмент
     const owned     = p.fragments || [];
     const available = FRAGS.filter(f => !owned.includes(f));
     const pick      = available.length
                       ? available[crypto.randomInt(available.length)]
                       : null;
+    console.log('[referral claim] pick fragment', pick);
 
-    // 4) сохраняем его и флаг reward_issued
+    // 4) Обновляем таблицу players
     await pool.query(
       `UPDATE players
-         SET fragments                 = CASE WHEN $2 IS NULL THEN fragments
+          SET fragments              = CASE WHEN $2 IS NULL THEN fragments
                                              ELSE array_append(fragments,$2)
                                         END,
-             referral_reward_issued    = TRUE
-       WHERE tg_id = $1`,
+              referral_reward_issued = TRUE
+        WHERE tg_id = $1`,
       [tg_id, pick]
     );
+    console.log('[referral claim] player updated');
 
-    // 5) отдаем результат и обновлённый токен
+    // 5) Отправляем ответ + новый токен
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
-    res.json({ ok: true, fragment: pick });
+    return res.json({ ok: true, fragment: pick });
 
   } catch (err) {
-    console.error('[referral claim]', err);
-    res.status(500).json({ error: 'internal' });
+    console.error('[referral claim] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
   }
 });
 
