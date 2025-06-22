@@ -15,7 +15,7 @@ const { JWT_SECRET, TON_WALLET_ADDRESS: TON_ADDR } = process.env;
 // ── CONSTANTS ─────────────────────────────────────────────────────
 const TONHUB_URL      = 'https://tonhub.com/transfer';
 const TONSPACE_SCHEME = 'ton://transfer';
-const AMOUNT_NANO     = 500_000_000;  // 0.5 TON в нанo
+const AMOUNT_NANO     = 500_000_000;  // 0.5 TON в нано
 const FRAGS           = [1,2,3,4,5,6,7,8];
 
 // ── HELPERS ───────────────────────────────────────────────────────
@@ -26,11 +26,9 @@ function sign(user) {
     { expiresIn: '1h' }
   );
 }
-
 function randRef() {
   return crypto.randomBytes(6).toString('base64url');
 }
-
 async function genUniqueCode() {
   for (let i = 0; i < 8; i++) {
     const code = randRef();
@@ -262,7 +260,7 @@ router.get('/referral', async (req, res) => {
       [tg_id]
     );
 
-    // продляем токен в заголовке
+    // обновляем токен в заголовке
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
     res.json({
       refCode: p.ref_code,
@@ -341,18 +339,15 @@ router.delete('/player/:tg_id', async (req, res) => {
     await client.query('BEGIN');
     await client.query(
       `DELETE FROM referrals
-         WHERE referrer_id = $1
-            OR referred_id = $1`,
+         WHERE referrer_id = $1 OR referred_id = $1`,
       [req.user.tg_id]
     );
     await client.query(
-      `DELETE FROM burn_invoices
-        WHERE tg_id = $1`,
+      `DELETE FROM burn_invoices WHERE tg_id = $1`,
       [req.user.tg_id]
     );
     await client.query(
-      `DELETE FROM players
-        WHERE tg_id = $1`,
+      `DELETE FROM players WHERE tg_id = $1`,
       [req.user.tg_id]
     );
     await client.query('COMMIT');
@@ -366,7 +361,7 @@ router.delete('/player/:tg_id', async (req, res) => {
   }
 });
 
-// ── BUSINESS LOGIC: выдача фрагмента ─────────────────────────
+// ── BUSINESS LOGIC ───────────────────────────────────────
 async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
@@ -400,9 +395,7 @@ async function runBurnLogic(invoiceId) {
 
     if (pick === null) {
       await client.query(
-        `UPDATE players
-            SET last_burn = NOW()
-          WHERE tg_id = $1`,
+        `UPDATE players SET last_burn = NOW() WHERE tg_id = $1`,
         [inv.tg_id]
       );
     } else {
