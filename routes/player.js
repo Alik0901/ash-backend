@@ -237,6 +237,64 @@ router.get('/referral/:tg_id', async (req, res) => {
     console.error('[referral]', err);
     res.status(500).json({ error: 'internal' });
   }
+});  
+
+router.post('/referral/claim', async (req, res) => {
+  // аутентификация уже прокинутой: req.user
+  const tg_id = req.user.tg_id;
+
+  try {
+    // 1) проверяем, не брали ли уже
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments, referral_reward_issued
+         FROM players
+        WHERE tg_id = $1`,
+      [tg_id]
+    );
+    if (!p) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
+    if (p.referral_reward_issued) {
+      return res.status(400).json({ error: 'Reward already claimed' });
+    }
+
+    // 2) считаем подтверждённых рефералов
+    const { rows: [{ count }] } = await pool.query(
+      `SELECT COUNT(*) FROM referrals
+         WHERE referrer_id = $1
+           AND status = 'confirmed'`,
+      [tg_id]
+    );
+    if (Number(count) < 3) {
+      return res.status(400).json({ error: 'Not enough invited users' });
+    }
+
+    // 3) выбираем свободный фрагмент
+    const owned     = p.fragments || [];
+    const available = FRAGS.filter(f => !owned.includes(f));
+    const pick      = available.length
+                      ? available[crypto.randomInt(available.length)]
+                      : null;
+
+    // 4) сохраняем его и флаг reward_issued
+    await pool.query(
+      `UPDATE players
+         SET fragments                 = CASE WHEN $2 IS NULL THEN fragments
+                                             ELSE array_append(fragments,$2)
+                                        END,
+             referral_reward_issued    = TRUE
+       WHERE tg_id = $1`,
+      [tg_id, pick]
+    );
+
+    // 5) отдаем результат и обновлённый токен
+    res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
+    res.json({ ok: true, fragment: pick });
+
+  } catch (err) {
+    console.error('[referral claim]', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
 /* ► DELETE /api/player/:tg_id — удалить профиль */
