@@ -1,9 +1,7 @@
-/*  Order-of-Ash · routes/player.js – v2.4 (22 Jun 2025)
+/*  Order-of-Ash · routes/player.js – v2.5 (23 Jun 2025)
     ─────────────────────────────────────────────────────────
-    • /burn-invoice  /burn-status  (полные)
-    • /referral       — «мягкий» (не 404, если игрока нет)
-    • /fragments      — выдаёт список фрагментов
-    • /stats/total_users
+    • все основные маршруты (init, player, burn, stats, fragments, referral)
+    • DELETE /player/:tg_id — транзакционная очистка профиля
 */
 
 import express from 'express';
@@ -15,206 +13,309 @@ import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 
-/* ── env ─────────────────────────────────────────────────── */
+/* ── ENV ─────────────────────────────────────────────────── */
 const { JWT_SECRET, TON_WALLET_ADDRESS: TON_ADDR } = process.env;
 
-/* ── constants ───────────────────────────────────────────── */
+/* ── CONSTANTS ───────────────────────────────────────────── */
 const TONHUB_URL      = 'https://tonhub.com/transfer';
 const TONSPACE_SCHEME = 'ton://transfer';
 const AMOUNT_NANO     = 500_000_000;            // 0.5 TON
 const FRAGS           = [1,2,3,4,5,6,7,8];
 
-/* ── helpers ─────────────────────────────────────────────── */
-const sign = u => jwt.sign(
-  { tg_id: u.tg_id, name: u.name }, JWT_SECRET, { expiresIn:'1h' });
+/* ── HELPERS ─────────────────────────────────────────────── */
+const sign = user =>
+  jwt.sign({ tg_id: user.tg_id, name: user.name }, JWT_SECRET, { expiresIn: '1h' });
 const randRef = () => crypto.randomBytes(6).toString('base64url');
 
 /* ╔════════════════  PUBLIC  ══════════════════════════════ */
 
-/* ► профиль */
-router.get('/player/:tg_id', async (req,res)=>{
+/* ► GET /api/player/:tg_id — профиль + приглашения */
+router.get('/player/:tg_id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT tg_id,name,fragments,last_burn,is_cursed,curse_expires,
               curses_count,ref_code,referral_reward_issued
-         FROM players WHERE tg_id=$1 LIMIT 1`, [req.params.tg_id]);
+         FROM players
+        WHERE tg_id=$1
+        LIMIT 1`,
+      [req.params.tg_id]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'player not found' });
+    }
 
-    if (!rows.length) return res.status(404).json({error:'player not found'});
-
-    const { rows:[{count}] } = await pool.query(
+    const { rows: [{ count }] } = await pool.query(
       `SELECT COUNT(*) FROM referrals
-        WHERE referrer_id=$1 AND status='confirmed'`, [rows[0].tg_id]);
+         WHERE referrer_id=$1 AND status='confirmed'`,
+      [rows[0].tg_id]
+    );
 
-    res.json({ ...rows[0], invitedCount:Number(count) });
-  } catch(e){
-    console.error('[player] ',e); res.status(500).json({error:'internal'});
+    res.json({ ...rows[0], invitedCount: Number(count) });
+  } catch (err) {
+    console.error('[player]', err);
+    res.status(500).json({ error: 'internal' });
   }
 });
 
-/* ► регистрация / JWT */
-router.post('/init', async (req,res)=>{
-  const { tg_id, name='', initData='', referrer_code=null } = req.body;
-  if(!tg_id||!initData) return res.status(400).json({error:'tg_id required'});
+/* ► POST /api/init — регистрация + JWT */
+router.post('/init', async (req, res) => {
+  const { tg_id, name = '', initData = '', referrer_code = null } = req.body;
+  if (!tg_id || !initData) {
+    return res.status(400).json({ error: 'tg_id and initData required' });
+  }
 
-  try{
+  try {
     let { rows } = await pool.query(
-      `SELECT * FROM players WHERE tg_id=$1`,[tg_id]);
+      `SELECT * FROM players WHERE tg_id=$1`,
+      [tg_id]
+    );
 
-    if(!rows.length){                                // новый
+    if (!rows.length) {
       const myCode = await genUniqueCode();
       const client = await pool.connect();
-      try{
+      try {
         await client.query('BEGIN');
 
-        const { rows:[me] } = await client.query(
+        const { rows: [me] } = await client.query(
           `INSERT INTO players
-             (tg_id,name,is_cursed,curses_count,curse_expires,
-              ref_code,referral_reward_issued)
+             (tg_id,name,is_cursed,curses_count,curse_expires,ref_code,referral_reward_issued)
            VALUES ($1,$2,FALSE,0,NULL,$3,FALSE)
-           RETURNING *`,[tg_id,name||null,myCode]);
+           RETURNING *`,
+          [tg_id, name || null, myCode]
+        );
 
-        if(referrer_code){
-          const { rows:[ref] } = await client.query(
+        if (referrer_code) {
+          const { rows: [ref] } = await client.query(
             `SELECT tg_id FROM players WHERE ref_code=$1 LIMIT 1`,
-            [referrer_code.trim()]);
-          if(!ref){ await client.query('ROLLBACK');
-            return res.status(400).json({error:'Invalid referral code'});}
-
+            [referrer_code.trim()]
+          );
+          if (!ref) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Invalid referral code' });
+          }
           await client.query(
             `INSERT INTO referrals (referrer_id,referred_id,status)
-             VALUES ($1,$2,'pending')`,[ref.tg_id,tg_id]);
+             VALUES ($1,$2,'pending')`,
+            [ref.tg_id, tg_id]
+          );
         }
 
         await client.query('COMMIT');
-        rows=[me];
-      }catch(e){await client.query('ROLLBACK');throw e;}
-      finally{client.release();}
+        rows = [me];
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
     }
-    res.json({user:rows[0],token:sign(rows[0])});
-  }catch(e){
-    console.error('[init] ',e);res.status(500).json({error:'internal'});
+
+    const user = rows[0];
+    res.json({ user, token: sign(user) });
+  } catch (err) {
+    console.error('[init]', err);
+    res.status(500).json({ error: 'internal' });
   }
 });
 
 /* ╔══════════════  PROTECTED  ═════════════════════════════ */
 router.use(authenticate);
 
-/* ► создать счёт */
-router.post('/burn-invoice', async (req,res)=>{
+/* ► POST /api/burn-invoice — создать счёт */
+router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
-  if(!tg_id) return res.status(400).json({error:'tg_id required'});
-  try{
-    const id      = uuid();
-    const comment = crypto.randomBytes(4).toString('hex');
+  if (!tg_id) {
+    return res.status(400).json({ error: 'tg_id required' });
+  }
+
+  try {
+    const invoiceId = uuid();
+    const comment   = crypto.randomBytes(4).toString('hex');
 
     await pool.query(
       `INSERT INTO burn_invoices
          (invoice_id,tg_id,amount_nano,address,comment,status,created_at)
        VALUES ($1,$2,$3,$4,$5,'pending',NOW())`,
-      [id,tg_id,AMOUNT_NANO,TON_ADDR,comment]);
+      [invoiceId, tg_id, AMOUNT_NANO, TON_ADDR, comment]
+    );
 
-    res.json({
-      invoiceId : id,
-      paymentUrl: `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
-      tonspaceUrl:`${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`
-    });
-  }catch(e){console.error('[burn-invoice]',e);
-    res.status(500).json({error:'internal'});}
+    const paymentUrl  = `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`;
+    const tonspaceUrl = `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`;
+
+    res.json({ invoiceId, paymentUrl, tonspaceUrl });
+  } catch (err) {
+    console.error('[burn-invoice]', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
-/* ► статус счёта + бизнес-логика */
-router.get('/burn-status/:invoiceId', async (req,res)=>{
-  try{
-    const { rows:[inv] } = await pool.query(
-      `SELECT status FROM burn_invoices WHERE invoice_id=$1`,[req.params.invoiceId]);
-    if(!inv) return res.status(404).json({error:'invoice not found'});
-    if(inv.status!=='paid') return res.json({paid:false});
+/* ► GET /api/burn-status/:invoiceId — статус + выдача фрагмента */
+router.get('/burn-status/:invoiceId', async (req, res) => {
+  try {
+    const { rows: [inv] } = await pool.query(
+      `SELECT status FROM burn_invoices WHERE invoice_id=$1`,
+      [req.params.invoiceId]
+    );
+    if (!inv) {
+      return res.status(404).json({ error: 'invoice not found' });
+    }
+    if (inv.status !== 'paid') {
+      return res.json({ paid: false });
+    }
 
     const result = await runBurnLogic(req.params.invoiceId);
-    res.json({paid:true, ...result});
-  }catch(e){console.error('[burn-status]',e);
-    res.status(500).json({error:'internal'});}
+    res.json({ paid: true, ...result });
+  } catch (err) {
+    console.error('[burn-status]', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
-/* ► мои фрагменты */
-router.get('/fragments/:tg_id', async (req,res)=>{
-  try{
-    const { rows:[p] } = await pool.query(
-      `SELECT fragments FROM players WHERE tg_id=$1`,[req.params.tg_id]);
-    if(!p) return res.status(404).json({error:'not found'});
-    res.json({ fragments:p.fragments||[] });
-  }catch(e){console.error('[fragments]',e);
-    res.status(500).json({error:'internal'});}
+/* ► GET /api/fragments/:tg_id — мои фрагменты */
+router.get('/fragments/:tg_id', async (req, res) => {
+  try {
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [req.params.tg_id]
+    );
+    if (!p) {
+      return res.status(404).json({ error: 'not found' });
+    }
+    res.json({ fragments: p.fragments || [] });
+  } catch (err) {
+    console.error('[fragments]', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
-/* ► общее число игроков */
-router.get('/stats/total_users', async (_req,res)=>{
-  try{
-    const { rows:[{count}] } =
-      await pool.query('SELECT COUNT(*) FROM players');
-    res.json({ total:Number(count) });
-  }catch(e){console.error('[stats]',e);
-    res.status(500).json({error:'internal'});}
+/* ► GET /api/stats/total_users — общее число игроков */
+router.get('/stats/total_users', async (_req, res) => {
+  try {
+    const { rows: [{ count }] } = await pool.query(
+      'SELECT COUNT(*) FROM players'
+    );
+    res.json({ total: Number(count) });
+  } catch (err) {
+    console.error('[stats]', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
-/* ► сводка по рефералам */
-router.get('/referral/:tg_id', async (req,res)=>{
-  if(String(req.user.tg_id)!==req.params.tg_id)
-    return res.status(403).json({error:'Forbidden'});
-  try{
-    const { rows:[p] } = await pool.query(
-      `SELECT ref_code,referral_reward_issued
-         FROM players WHERE tg_id=$1`,[req.user.tg_id]);
-    if(!p) return res.json({refCode:null,invitedCount:0,rewardIssued:false});
+/* ► GET /api/referral/:tg_id — сводка рефералов (мягко) */
+router.get('/referral/:tg_id', async (req, res) => {
+  if (String(req.user.tg_id) !== req.params.tg_id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
 
-    const { rows:[{count}] } = await pool.query(
+  try {
+    const { rows: [p] } = await pool.query(
+      `SELECT ref_code, referral_reward_issued
+         FROM players WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+    if (!p) {
+      return res.json({
+        refCode: null,
+        invitedCount: 0,
+        rewardIssued: false
+      });
+    }
+
+    const { rows: [{ count }] } = await pool.query(
       `SELECT COUNT(*) FROM referrals
-        WHERE referrer_id=$1 AND status='confirmed'`,[req.user.tg_id]);
+         WHERE referrer_id=$1 AND status='confirmed'`,
+      [req.user.tg_id]
+    );
 
-    res.setHeader('Authorization',`Bearer ${sign(req.user)}`);
-    res.json({ refCode:p.ref_code,invitedCount:Number(count),
-               rewardIssued:p.referral_reward_issued });
-  }catch(e){console.error('[referral]',e);
-    res.status(500).json({error:'internal'});}
+    res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
+    res.json({
+      refCode: p.ref_code,
+      invitedCount: Number(count),
+      rewardIssued: p.referral_reward_issued
+    });
+  } catch (err) {
+    console.error('[referral]', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
-/* ── runBurnLogic ────────────────────────────────────────── */
+/* ► DELETE /api/player/:tg_id — удалить профиль */
+router.delete('/player/:tg_id', async (req, res) => {
+  if (String(req.user.tg_id) !== req.params.tg_id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Удаляем рефералы
+    await client.query(
+      `DELETE FROM referrals
+         WHERE referrer_id=$1 OR referred_id=$1`,
+      [req.user.tg_id]
+    );
+    // Удаляем счета
+    await client.query(
+      `DELETE FROM burn_invoices WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+    // Удаляем профиль
+    await client.query(
+      `DELETE FROM players WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[delete]', err);
+    res.status(500).json({ error: 'internal' });
+  } finally {
+    client.release();
+  }
+});
+
+/* ── BUSINESS LOGIC — выдача фрагмента ───────────────────── */
 async function runBurnLogic (invoiceId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    /* 1. счёт */
-    const { rows:[inv] } = await client.query(
+    // 1) берём счёт
+    const { rows: [inv] } = await client.query(
       `SELECT tg_id, processed
          FROM burn_invoices
-        WHERE invoice_id = $1
-          AND status      = 'paid'
+        WHERE invoice_id=$1
+          AND status='paid'
         FOR UPDATE`,
       [invoiceId]
     );
     if (!inv || inv.processed) {
       await client.query('ROLLBACK');
-      return { newFragment:null, cursed:false, curse_expires:null };
+      return { newFragment: null, cursed: false, curse_expires: null };
     }
 
-    /* 2. выбираем фрагмент */
-    const { rows:[pl] } = await client.query(
-      `SELECT fragments FROM players WHERE tg_id = $1 FOR UPDATE`,
+    // 2) читаем фрагменты игрока
+    const { rows: [pl] } = await client.query(
+      `SELECT fragments FROM players
+        WHERE tg_id=$1
+        FOR UPDATE`,
       [inv.tg_id]
     );
-    const owned     = pl.fragments ?? [];
+    const owned     = pl.fragments || [];
     const available = FRAGS.filter(f => !owned.includes(f));
     const pick      = available.length
-                        ? available[crypto.randomInt(available.length)]
-                        : null;
+                      ? available[crypto.randomInt(available.length)]
+                      : null;
 
-    /* 3. обновляем игрока */
+    // 3) обновляем игрока
     if (pick === null) {
       await client.query(
         `UPDATE players
             SET last_burn = NOW()
-          WHERE tg_id = $1`,
+          WHERE tg_id=$1`,
         [inv.tg_id]
       );
     } else {
@@ -222,20 +323,21 @@ async function runBurnLogic (invoiceId) {
         `UPDATE players
             SET fragments = array_append(fragments, $2::int),
                 last_burn = NOW()
-          WHERE tg_id = $1`,
+          WHERE tg_id=$1`,
         [inv.tg_id, pick]
       );
     }
 
-    /* 4. помечаем счёт processed */
+    // 4) помечаем счёт
     await client.query(
-      `UPDATE burn_invoices SET processed = TRUE WHERE invoice_id = $1`,
+      `UPDATE burn_invoices
+          SET processed = TRUE
+        WHERE invoice_id=$1`,
       [invoiceId]
     );
 
     await client.query('COMMIT');
-    return { newFragment: pick, cursed:false, curse_expires:null };
-
+    return { newFragment: pick, cursed: false, curse_expires: null };
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[runBurnLogic]', err);
@@ -245,14 +347,15 @@ async function runBurnLogic (invoiceId) {
   }
 }
 
-/* ── вспомогательное ─────────────────────────────────────── */
-async function genUniqueCode(){
-  for(let i=0;i<8;i++){
+/* ── UTILS — генерация уникального кода ───────────────────── */
+async function genUniqueCode() {
+  for (let i = 0; i < 8; i++) {
     const code = randRef();
-    const { rows } =
-      await pool.query(`SELECT 1 FROM players WHERE ref_code=$1 LIMIT 1`,
-        [code]);
-    if(!rows.length) return code;
+    const { rows } = await pool.query(
+      `SELECT 1 FROM players WHERE ref_code=$1 LIMIT 1`,
+      [code]
+    );
+    if (!rows.length) return code;
   }
   return crypto.randomBytes(8).toString('base64url');
 }
