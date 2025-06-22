@@ -1,4 +1,3 @@
-// routes/player.js
 import express from 'express';
 import crypto  from 'crypto';
 import jwt     from 'jsonwebtoken';
@@ -78,15 +77,14 @@ router.post('/init', async (req, res) => {
     );
 
     if (!rows.length) {
-      // создаём нового игрока
       const myCode = await genUniqueCode();
       const client = await pool.connect();
+
       try {
         await client.query('BEGIN');
         const { rows: [me] } = await client.query(
           `INSERT INTO players
-             (tg_id, name, is_cursed, curses_count, curse_expires,
-              ref_code, referral_reward_issued)
+             (tg_id,name,is_cursed,curses_count,curse_expires,ref_code,referral_reward_issued)
            VALUES ($1,$2,FALSE,0,NULL,$3,FALSE)
            RETURNING *`,
           [tg_id, name.trim() || null, myCode]
@@ -102,7 +100,7 @@ router.post('/init', async (req, res) => {
             return res.status(400).json({ error: 'Invalid referral code' });
           }
           await client.query(
-            `INSERT INTO referrals (referrer_id, referred_id, status)
+            `INSERT INTO referrals (referrer_id,referred_id,status)
              VALUES ($1,$2,'pending')`,
             [ref.tg_id, tg_id]
           );
@@ -143,15 +141,13 @@ router.post('/burn-invoice', async (req, res) => {
     const comment   = crypto.randomBytes(4).toString('hex');
     await pool.query(
       `INSERT INTO burn_invoices
-         (invoice_id, tg_id, amount_nano, address, comment, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,'pending', NOW())`,
+         (invoice_id,tg_id,amount_nano,address,comment,status,created_at)
+       VALUES ($1,$2,$3,$4,$5,'pending',NOW())`,
       [invoiceId, tg_id, AMOUNT_NANO, TON_ADDR, comment]
     );
 
-    const paymentUrl  = `${TONHUB_URL}/${TON_ADDR}` +
-                        `?amount=${AMOUNT_NANO}&text=${comment}`;
-    const tonspaceUrl = `${TONSPACE_SCHEME}/${TON_ADDR}` +
-                        `?amount=${AMOUNT_NANO}&text=${comment}`;
+    const paymentUrl  = `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`;
+    const tonspaceUrl = `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`;
 
     res.json({ invoiceId, paymentUrl, tonspaceUrl });
   } catch (err) {
@@ -212,16 +208,15 @@ router.get('/stats/total_users', async (_req, res) => {
   }
 });
 
-// ► GET /api/referral/:tg_id — сводка по рефералам
-router.get('/referral/:tg_id', async (req, res) => {
-  if (String(req.user.tg_id) !== req.params.tg_id) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+// ► GET /api/referral — сводка по рефералам (берём tg_id из токена)
+router.get('/referral', async (req, res) => {
+  const tg_id = req.user.tg_id;
+
   try {
     const { rows: [p] } = await pool.query(
       `SELECT ref_code, referral_reward_issued
          FROM players WHERE tg_id = $1`,
-      [req.user.tg_id]
+      [tg_id]
     );
     if (!p) {
       return res.json({
@@ -236,7 +231,7 @@ router.get('/referral/:tg_id', async (req, res) => {
          FROM referrals
         WHERE referrer_id = $1
           AND status       = 'confirmed'`,
-      [req.user.tg_id]
+      [tg_id]
     );
 
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
@@ -254,9 +249,6 @@ router.get('/referral/:tg_id', async (req, res) => {
 // ► POST /api/referral/claim — выдача бесплатного фрагмента
 router.post('/referral/claim', async (req, res) => {
   const tg_id = req.user.tg_id;
-  if (!tg_id) {
-    return res.status(401).json({ error: 'Unauthenticated' });
-  }
 
   try {
     const { rows } = await pool.query(
@@ -275,8 +267,7 @@ router.post('/referral/claim', async (req, res) => {
     const { rows: [c] } = await pool.query(
       `SELECT COUNT(*) AS cnt
          FROM referrals
-        WHERE referrer_id = $1
-          AND status       = 'confirmed'`,
+        WHERE referrer_id = $1 AND status = 'confirmed'`,
       [tg_id]
     );
     if (Number(c.cnt) < 3) {
