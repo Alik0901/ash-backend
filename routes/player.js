@@ -486,17 +486,5 @@ router.delete('/player/:tg_id', async (req, res) => {
     client.release();
   }
 });
-router.get(
-  '/fragments/image/:filename',
-  authenticate,              // проверяем JWT
-  (req, res) => {
-    const fn = req.params.filename;
-    // предполагаем, что все webp-ки лежат в папке project_root/fragments
-    const full = path.join(process.cwd(), 'fragments', fn);
-    res.sendFile(full, err => {
-      if (err) res.status(404).end();
-    });
-  }
-);
 
 export default router;
