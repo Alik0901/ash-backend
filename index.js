@@ -10,6 +10,7 @@ import cors           from 'cors';
 import rateLimit      from 'express-rate-limit';
 import dotenv         from 'dotenv';
 import morgan         from 'morgan';
+import fragmentsRouter from './routes/fragments.js';
 
 import './worker/check-payments.js';
 
@@ -28,6 +29,7 @@ const app = express();
 /* ─ middleware ─────────────────────────────────────────────────── */
 app.use(helmet());
 app.use(morgan('dev'));
+app.use('/api/fragments', fragmentsRouter);
 
 /* — CORS ----------------------------------------------------------- */
 const ALLOWED = [
