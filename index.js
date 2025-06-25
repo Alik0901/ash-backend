@@ -1,4 +1,4 @@
-// index.js  (версия: v2.4)
+// index.js  (версия: v2.5)
 import express        from 'express';
 import helmet         from 'helmet';
 import cors           from 'cors';
@@ -17,8 +17,8 @@ import { authenticate }   from './middleware/auth.js';
 //
 // 📌 НОВОЕ ДЛЯ PRESIGNED URLS
 //
-const FRAG_DIR    = path.join(process.cwd(), 'public', 'fragments');
-const FRAG_FILES  = [
+const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
+const FRAG_FILES = [
   'fragment_1_the_whisper.webp',
   'fragment_2_the_number.webp',
   'fragment_3_the_language.webp',
@@ -39,10 +39,20 @@ if (process.env.NODE_ENV !== 'production') {
 
 const app = express();
 
-// —— стандартные middleware ——————————————————————————————————————————————
-app.use(helmet());
+//
+// ─── global middleware ────────────────────────────────────────────
+//
+app.use(
+  helmet({
+    // оставляем все дефолтные защиты, но отключаем strict same-origin
+    crossOriginResourcePolicy: false
+  })
+);
 app.use(morgan('dev'));
 
+//
+// CORS для API
+//
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/,
@@ -50,14 +60,14 @@ const ALLOWED = [
 ];
 app.use(
   cors({
-    origin: (o, cb) => {
-      if (!o) return cb(null, true);
-      if (ALLOWED.some(x => (x instanceof RegExp ? x.test(o) : x === o)))
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (ALLOWED.some(x => (x instanceof RegExp ? x.test(origin) : x === origin)))
         return cb(null, true);
-      return cb(new Error(`CORS blocked: ${o}`));
+      cb(new Error(`CORS blocked: ${origin}`));
     },
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET','POST','DELETE','OPTIONS'],
+    allowedHeaders: ['Content-Type','Authorization'],
   })
 );
 app.options('*', cors());
@@ -83,7 +93,7 @@ app.get('/', (_req, res) => res.sendStatus(200));
 app.get('/test-db', async (_req, res) => {
   try {
     const { default: pool } = await import('./db.js');
-    const { rows }        = await pool.query('SELECT NOW() AS now');
+    const { rows }          = await pool.query('SELECT NOW() AS now');
     return res.json(rows[0]);
   } catch (err) {
     console.error('🔴 /test-db error:', err);
@@ -92,14 +102,14 @@ app.get('/test-db', async (_req, res) => {
 });
 
 //
-// ▶️ 1) PRESIGNED URLS ENDPOINT — до authenticate
+// ▶️ 1) PRESIGNED URLS ENDPOINT (до authenticate)
 //
 app.get(
   '/api/fragments/urls',
   authenticate,
   (req, res) => {
-    const TTL       = 5 * 60 * 1000; // 5 минут
-    const now       = Date.now();
+    const TTL        = 5 * 60 * 1000; // 5 минут
+    const now        = Date.now();
     const signedUrls = {};
 
     for (const name of FRAG_FILES) {
@@ -120,40 +130,39 @@ app.get(
 );
 
 //
-// ▶️ 2) Авторизация остальных /api
+// ▶️ 2) Auth для остальных API
 //
 app.use('/api', (req, res, next) => {
   if (req.method === 'OPTIONS') return next();
   if (req.method === 'POST' && req.path === '/init') return next();
-  if (req.method === 'GET' && /^\/player\/[^/]+$/.test(req.path))
-    return next();
+  if (req.method === 'GET' && /^\/player\/[^/]+$/.test(req.path)) return next();
   return authenticate(req, res, next);
 });
 
 //
-// ▶️ 3) Игровые /api-маршруты
+// ▶️ 3) Основные игровые маршруты
 //
 app.use('/api', playerRoutes);
 
 //
-// ▶️ 4) СТАТИКА ФРАГМЕНТОВ С ПРОВЕРКОЙ SIG/EXP
+// ▶️ 4) Статика фрагментов с проверкой exp/sig + CORS
 //
 app.get('/fragments/:name', (req, res) => {
   const { name } = req.params;
   const exp      = Number(req.query.exp || 0);
   const sig      = req.query.sig || '';
 
-  // 1) проверяем, что запрашивают корректный файл
+  // 1) валидируем имя
   if (!FRAG_FILES.includes(name)) {
     return res.status(404).end();
   }
 
-  // 2) проверяем срок годности
+  // 2) проверяем срок
   if (Date.now() > exp) {
     return res.status(403).json({ error: 'Link expired' });
   }
 
-  // 3) сверяем HMAC
+  // 3) сверяем подпись
   const expected = crypto
     .createHmac('sha256', HMAC_SECRET)
     .update(`${name}|${exp}`)
@@ -162,8 +171,12 @@ app.get('/fragments/:name', (req, res) => {
     return res.status(403).json({ error: 'Invalid signature' });
   }
 
-  // 4) отдаем файл
-  res.sendFile(path.join(FRAG_DIR, name));
+  // 4) CORS-заголовки для <img> с другого origin
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+
+  // 5) отдаем сам файл
+  return res.sendFile(path.join(FRAG_DIR, name));
 });
 
 //
