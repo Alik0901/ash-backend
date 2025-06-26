@@ -27,6 +27,7 @@ const FRAG_FILES = [
   'fragment_6_the_hour.webp',
   'fragment_7_the_mark.webp',
   'fragment_8_the_gate.webp',
+  'final-image.webp',
 ];
 const HMAC_SECRET = process.env.FRAG_HMAC_SECRET;
 if (!HMAC_SECRET) {
