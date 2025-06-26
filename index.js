@@ -19,14 +19,14 @@ import { authenticate }   from './middleware/auth.js';
 //
 const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
 const FRAG_FILES = [
-  'fragment_1_the_whisper.webp',
-  'fragment_2_the_number.webp',
-  'fragment_3_the_language.webp',
-  'fragment_4_the_mirror.webp',
-  'fragment_5_the_chain.webp',
-  'fragment_6_the_hour.webp',
-  'fragment_7_the_mark.webp',
-  'fragment_8_the_gate.webp',
+  'fragment_1_the_whisper.jpg',
+  'fragment_2_the_number.jpg',
+  'fragment_3_the_language.jpg',
+  'fragment_4_the_mirror.jpg',
+  'fragment_5_the_chain.jpg',
+  'fragment_6_the_hour.jpg',
+  'fragment_7_the_mark.jpg',
+  'fragment_8_the_gate.jpg',
   'final-image.jpg',
 ];
 const HMAC_SECRET = process.env.FRAG_HMAC_SECRET;
