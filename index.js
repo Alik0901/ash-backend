@@ -1,4 +1,3 @@
-// index.js  (версия: v2.5)
 import express        from 'express';
 import helmet         from 'helmet';
 import cors           from 'cors';
@@ -14,9 +13,12 @@ import validateFinalRoute from './routes/validateFinal.js';
 import playerRoutes       from './routes/player.js';
 import { authenticate }   from './middleware/auth.js';
 
-//
-// 📌 НОВОЕ ДЛЯ PRESIGNED URLS
-//
+// Загружаем .env
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config();
+}
+
+// Константы
 const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
 const FRAG_FILES = [
   'fragment_1_the_whisper.jpg',
@@ -34,54 +36,40 @@ if (!HMAC_SECRET) {
   console.error('⚠️ FRAG_HMAC_SECRET is not set in .env');
 }
 
-if (process.env.NODE_ENV !== 'production') {
-  dotenv.config();
-}
-
 const app = express();
 
-//
-// ─── global middleware ────────────────────────────────────────────
-//
-app.use(
-  helmet({
-    // оставляем все дефолтные защиты, но отключаем strict same-origin
-    crossOriginResourcePolicy: false
-  })
-);
+// ─── Global middleware ────────────────────────────────────────────
+app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan('dev'));
 
-//
 // CORS для API
-//
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/,
   /\.up\.railway\.app$/,
 ];
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      if (ALLOWED.some(x => (x instanceof RegExp ? x.test(origin) : x === origin)))
-        return cb(null, true);
-      cb(new Error(`CORS blocked: ${origin}`));
-    },
-    methods: ['GET','POST','DELETE','OPTIONS'],
-    allowedHeaders: ['Content-Type','Authorization'],
-  })
-);
+app.use(cors({
+  origin: (o, cb) => {
+    if (!o) return cb(null, true);
+    if (ALLOWED.some(x => x instanceof RegExp ? x.test(o) : x === o))
+      return cb(null, true);
+    cb(new Error(`CORS blocked: ${o}`));
+  },
+  methods: ['GET','POST','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+}));
 app.options('*', cors());
 
 app.disable('etag');
-app.use('/api', (_req, res, next) => {
+app.use('/api', (_q, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
 app.use(express.json({ limit: '10kb' }));
 
+// Rate-limit для validate
 const validateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15*60*1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
@@ -90,27 +78,37 @@ const validateLimiter = rateLimit({
 app.use('/api/validate',       validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-app.get('/', (_req, res) => res.sendStatus(200));
-app.get('/test-db', async (_req, res) => {
+// Health-check и тест БД
+app.get('/', (_r, res) => res.sendStatus(200));
+app.get('/test-db', async (_r, res) => {
   try {
     const { default: pool } = await import('./db.js');
     const { rows }          = await pool.query('SELECT NOW() AS now');
-    return res.json(rows[0]);
+    res.json(rows[0]);
   } catch (err) {
-    console.error('🔴 /test-db error:', err);
-    return res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-//
-// ▶️ 1) PRESIGNED URLS ENDPOINT (до authenticate)
-//
+// ─── Статика фрагментов + final-image.jpg ────────────────────────
+app.use(
+  '/fragments',
+  express.static(FRAG_DIR, {
+    setHeaders(res) {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    }
+  })
+);
+
+// ▶️ 1) PRESIGNED URLS (до authenticate)
 app.get(
   '/api/fragments/urls',
   authenticate,
   (req, res) => {
-    const TTL        = 5 * 60 * 1000; // 5 минут
-    const now        = Date.now();
+    const TTL = 5*60*1000;
+    const now = Date.now();
     const signedUrls = {};
 
     for (const name of FRAG_FILES) {
@@ -120,70 +118,30 @@ app.get(
         .createHmac('sha256', HMAC_SECRET)
         .update(payload)
         .digest('hex');
-
       signedUrls[name] = `${req.protocol}://${req.get('host')}` +
                          `/fragments/${encodeURIComponent(name)}` +
                          `?exp=${exp}&sig=${sig}`;
     }
-
     res.json({ signedUrls });
   }
 );
 
-//
 // ▶️ 2) Auth для остальных API
-//
 app.use('/api', (req, res, next) => {
-  if (req.method === 'OPTIONS') return next();
+  if (req.method === 'OPTIONS')                 return next();
   if (req.method === 'POST' && req.path === '/init') return next();
-  if (req.method === 'GET' && /^\/player\/[^/]+$/.test(req.path)) return next();
+  if (req.method === 'GET'  && /^\/player\/[^/]+$/.test(req.path))
+    return next();
   return authenticate(req, res, next);
 });
 
-//
-// ▶️ 3) Основные игровые маршруты
-//
+// ▶️ 3) Игровые маршруты
 app.use('/api', playerRoutes);
 
-//
-// ▶️ 4) Статика фрагментов с проверкой exp/sig + CORS
-//
-app.get('/fragments/:name', (req, res) => {
-  const { name } = req.params;
-  const exp      = Number(req.query.exp || 0);
-  const sig      = req.query.sig || '';
+// ▶️ 4) Фоллбек (не должен срабатывать, статик выше уходит первым)
+app.get('/fragments/:name', (_req, res) => res.status(404).end());
 
-  // 1) валидируем имя
-  if (!FRAG_FILES.includes(name)) {
-    return res.status(404).end();
-  }
-
-  // 2) проверяем срок
-  if (Date.now() > exp) {
-    return res.status(403).json({ error: 'Link expired' });
-  }
-
-  // 3) сверяем подпись
-  const expected = crypto
-    .createHmac('sha256', HMAC_SECRET)
-    .update(`${name}|${exp}`)
-    .digest('hex');
-  if (sig !== expected) {
-    return res.status(403).json({ error: 'Invalid signature' });
-  }
-
-  // 4) CORS-заголовки для <img> с другого origin
-  res.set('Access-Control-Allow-Origin', '*');
-  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
-
-  // 5) отдаем сам файл
-  return res.sendFile(path.join(FRAG_DIR, name));
-});
-
-//
-// ▶️ 5) Старт сервера
-//
-const PORT = parseInt(process.env.PORT ?? '3000', 10);
-console.log('ENV PORT        =', process.env.PORT);
-console.log('→ Listening on', PORT);
+// ▶️ 5) Старт
+const PORT = parseInt(process.env.PORT||'3000',10);
+console.log('Listening on', PORT);
 app.listen(PORT, '0.0.0.0');
