@@ -1,3 +1,4 @@
+// index.js  (v2.6 с HMAC для фрагментов + статика для final-image)
 import express        from 'express';
 import helmet         from 'helmet';
 import cors           from 'cors';
@@ -13,12 +14,13 @@ import validateFinalRoute from './routes/validateFinal.js';
 import playerRoutes       from './routes/player.js';
 import { authenticate }   from './middleware/auth.js';
 
-// Загружаем .env
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
 }
 
-// Константы
+const app = express();
+
+// где лежат все ваши картинки
 const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
 const FRAG_FILES = [
   'fragment_1_the_whisper.jpg',
@@ -29,20 +31,17 @@ const FRAG_FILES = [
   'fragment_6_the_hour.jpg',
   'fragment_7_the_mark.jpg',
   'fragment_8_the_gate.jpg',
-  'final-image.jpg',
 ];
+const FINAL_FILE = 'final-image.jpg';
 const HMAC_SECRET = process.env.FRAG_HMAC_SECRET;
 if (!HMAC_SECRET) {
   console.error('⚠️ FRAG_HMAC_SECRET is not set in .env');
 }
 
-const app = express();
-
-// ─── Global middleware ────────────────────────────────────────────
+// —— global middleware —————————————————————————————————————————
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan('dev'));
 
-// CORS для API
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/,
@@ -61,15 +60,14 @@ app.use(cors({
 app.options('*', cors());
 
 app.disable('etag');
-app.use('/api', (_q, res, next) => {
+app.use('/api', (_req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
 app.use(express.json({ limit: '10kb' }));
 
-// Rate-limit для validate
 const validateLimiter = rateLimit({
-  windowMs: 15*60*1000,
+  windowMs: 15 * 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
@@ -78,9 +76,8 @@ const validateLimiter = rateLimit({
 app.use('/api/validate',       validateLimiter, validateRoute);
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-// Health-check и тест БД
-app.get('/', (_r, res) => res.sendStatus(200));
-app.get('/test-db', async (_r, res) => {
+app.get('/', (_req, res) => res.sendStatus(200));
+app.get('/test-db', async (_req, res) => {
   try {
     const { default: pool } = await import('./db.js');
     const { rows }          = await pool.query('SELECT NOW() AS now');
@@ -91,27 +88,16 @@ app.get('/test-db', async (_r, res) => {
   }
 });
 
-// ─── Статика фрагментов + final-image.jpg ────────────────────────
-app.use(
-  '/fragments',
-  express.static(FRAG_DIR, {
-    setHeaders(res) {
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cross-Origin-Resource-Policy', 'cross-origin');
-    }
-  })
-);
-
-// ▶️ 1) PRESIGNED URLS (до authenticate)
+// ▶️ 1) PRESIGNED URLS — до authenticate
 app.get(
   '/api/fragments/urls',
   authenticate,
   (req, res) => {
-    const TTL = 5*60*1000;
+    const TTL = 5 * 60 * 1000;
     const now = Date.now();
     const signedUrls = {};
 
-    for (const name of FRAG_FILES) {
+    for (const name of [...FRAG_FILES, FINAL_FILE]) {
       const exp     = now + TTL;
       const payload = `${name}|${exp}`;
       const sig     = crypto
@@ -119,18 +105,19 @@ app.get(
         .update(payload)
         .digest('hex');
       signedUrls[name] = `${req.protocol}://${req.get('host')}` +
-                         `/fragments/${encodeURIComponent(name)}` +
-                         `?exp=${exp}&sig=${sig}`;
+        `/fragments/${encodeURIComponent(name)}` +
+        `?exp=${exp}&sig=${sig}`;
     }
+
     res.json({ signedUrls });
   }
 );
 
 // ▶️ 2) Auth для остальных API
 app.use('/api', (req, res, next) => {
-  if (req.method === 'OPTIONS')                 return next();
+  if (req.method === 'OPTIONS') return next();
   if (req.method === 'POST' && req.path === '/init') return next();
-  if (req.method === 'GET'  && /^\/player\/[^/]+$/.test(req.path))
+  if (req.method === 'GET' && /^\/player\/[^/]+$/.test(req.path))
     return next();
   return authenticate(req, res, next);
 });
@@ -138,10 +125,44 @@ app.use('/api', (req, res, next) => {
 // ▶️ 3) Игровые маршруты
 app.use('/api', playerRoutes);
 
-// ▶️ 4) Фоллбек (не должен срабатывать, статик выше уходит первым)
-app.get('/fragments/:name', (_req, res) => res.status(404).end());
+// ▶️ 4a) Ручная отдача защищённых фрагментов
+app.get('/fragments/:name', (req, res, next) => {
+  const { name } = req.params;
+  const exp      = Number(req.query.exp || 0);
+  const sig      = req.query.sig || '';
+
+  if (FRAG_FILES.includes(name)) {
+    // проверка срока
+    if (Date.now() > exp) return res.status(403).json({ error: 'Link expired' });
+
+    // проверка HMAC
+    const expected = crypto
+      .createHmac('sha256', HMAC_SECRET)
+      .update(`${name}|${exp}`)
+      .digest('hex');
+    if (sig !== expected) return res.status(403).json({ error: 'Invalid signature' });
+
+    // CORS
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+
+    // отдать фрагмент
+    return res.sendFile(path.join(FRAG_DIR, name));
+  }
+
+  // если это не один из 8 фрагментов — передать дальше
+  next();
+});
+
+// ▶️ 4b) Статика только для final-image.jpg
+app.get('/fragments/' + FINAL_FILE, (req, res) => {
+  // не проверяем HMAC
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.sendFile(path.join(FRAG_DIR, FINAL_FILE));
+});
 
 // ▶️ 5) Старт
-const PORT = parseInt(process.env.PORT||'3000',10);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 console.log('Listening on', PORT);
 app.listen(PORT, '0.0.0.0');
