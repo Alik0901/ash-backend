@@ -1,4 +1,3 @@
-// src/routes/player.js
 import express        from 'express'
 import crypto         from 'crypto'
 import jwt            from 'jsonwebtoken'
@@ -7,26 +6,17 @@ import pool           from '../db.js'
 import { authenticate } from '../middleware/auth.js'
 
 const router = express.Router()
+const { JWT_SECRET, TON_WALLET_ADDRESS: TON_ADDR } = process.env
 
-// JWT secret and TON wallet address from environment
-const JWT_SECRET         = process.env.JWT_SECRET
-const TON_WALLET_ADDRESS = process.env.TON_WALLET_ADDRESS
-
-// URLs and amounts for TON payments
 const TONHUB_URL      = 'https://tonhub.com/transfer'
 const TONSPACE_SCHEME = 'ton://transfer'
-const AMOUNT_NANO     = 500_000_000  // 0.5 TON in nanoton
+const AMOUNT_NANO     = 500_000_000  // 0.5 TON in nano
+const FRAGS           = [1,2,3,4,5,6,7,8]
+const MANDATORY       = [1,2,3]      // три обязательных фрагмента
+const MAX_CURSES      = MANDATORY.length  // сколько всего проклятий нужно выдать
 
-// All eight fragment IDs
-const FRAGMENT_IDS = [1,2,3,4,5,6,7,8]
-
-// The three “mandatory” fragments that trigger a curse
-const MANDATORY_IDS = [1,2,3]
-
-/**
- * Create and sign a JWT for the user payload.
- */
-function signToken(user) {
+/** Sign and issue JWT */
+function sign(user) {
   return jwt.sign(
     { tg_id: user.tg_id, name: user.name },
     JWT_SECRET,
@@ -34,44 +24,36 @@ function signToken(user) {
   )
 }
 
-/**
- * Generate a random referral code.
- */
-function generateReferralCode() {
+/** Random referral code */
+function randRef() {
   return crypto.randomBytes(6).toString('base64url')
 }
 
-/**
- * Ensure the generated referral code is unique in the database.
- */
-async function generateUniqueReferralCode() {
+/** Ensure code is unique */
+async function genUniqueCode() {
   for (let i = 0; i < 8; i++) {
-    const candidate = generateReferralCode()
+    const code = randRef()
     const { rows } = await pool.query(
       `SELECT 1 FROM players WHERE ref_code = $1 LIMIT 1`,
-      [candidate]
+      [code]
     )
-    if (rows.length === 0) {
-      return candidate
-    }
+    if (!rows.length) return code
   }
-  // Fallback if collisions occurred
   return crypto.randomBytes(8).toString('base64url')
 }
 
 /**
- * Core logic after a payment is marked "paid":
- * - If the user has collected all mandatory fragments and is not yet cursed,
- *   apply a curse instead of giving a new fragment.
- * - Otherwise, grant a random new fragment (if any remain) or just reset cooldown.
+ * After payment, either issue a curse or a new fragment.
+ * Теперь после трёх обязательных фрагментов рандомно распределяет
+ * ровно MAX_CURSES проклятий среди оставшихся попыток.
  */
 async function runBurnLogic(invoiceId) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
 
-    // 1) Lock the invoice row and check if it's paid and not yet processed
-    const { rows: [invoice] } = await client.query(
+    // 1) lock invoice
+    const { rows: [inv] } = await client.query(
       `SELECT tg_id, processed
          FROM burn_invoices
         WHERE invoice_id = $1
@@ -79,75 +61,84 @@ async function runBurnLogic(invoiceId) {
         FOR UPDATE`,
       [invoiceId]
     )
-    if (!invoice || invoice.processed) {
+    if (!inv || inv.processed) {
       await client.query('ROLLBACK')
       return { newFragment: null, cursed: false, curse_expires: null }
     }
 
-    // 2) Lock the player's row and fetch their fragments and curse state
-    const { rows: [player] } = await client.query(
-      `SELECT fragments, is_cursed
+    // 2) lock player, fetch fragments + curse state
+    const { rows: [pl] } = await client.query(
+      `SELECT fragments, is_cursed, curses_count
          FROM players
         WHERE tg_id = $1
         FOR UPDATE`,
-      [invoice.tg_id]
+      [inv.tg_id]
     )
-    const ownedFragments = player.fragments || []
-    const alreadyCursed   = player.is_cursed
+    const owned         = pl.fragments || []
+    const cursesSoFar   = pl.curses_count || 0
 
-    // 3) If all mandatory fragments are owned and player is not yet cursed → issue curse
-    const hasAllMandatory = MANDATORY_IDS.every(id => ownedFragments.includes(id))
-    if (hasAllMandatory && !alreadyCursed) {
-      const curseDurationMs = 2 * 60 * 1000  // 1 hour
-      const curseExpires    = new Date(Date.now() + curseDurationMs)
-      await client.query(
-        `UPDATE players
-            SET is_cursed     = TRUE,
-                curses_count  = curses_count + 1,
-                curse_expires = $2
-          WHERE tg_id = $1`,
-        [invoice.tg_id, curseExpires]
-      )
-      await client.query(
-        `UPDATE burn_invoices
-            SET processed = TRUE
-          WHERE invoice_id = $1`,
-        [invoiceId]
-      )
-      await client.query('COMMIT')
-      return {
-        newFragment: null,
-        cursed: true,
-        curse_expires: curseExpires.toISOString()
+    // готовы ли мы начать выдавать проклятия?
+    const hasAllMandatory = MANDATORY.every(id => owned.includes(id))
+
+    // если обязательные уже есть и ещё не выдано все проклятия
+    if (hasAllMandatory && cursesSoFar < MAX_CURSES) {
+      // сколько фрагментов ещё не взято
+      const availableFrags = FRAGS.filter(f => !owned.includes(f))
+      const fragsLeft      = availableFrags.length
+      const cursesLeft     = MAX_CURSES - cursesSoFar
+      // вероятность выдать проклятие именно сейчас
+      const pCurse = cursesLeft / (fragsLeft + cursesLeft)
+      if (Math.random() < pCurse) {
+        // выдаём проклятие
+        const curseExpires = new Date(Date.now() + 60*60*1000) // 1 час
+        await client.query(
+          `UPDATE players
+              SET is_cursed     = TRUE,
+                  curses_count  = curses_count + 1,
+                  curse_expires = $2
+            WHERE tg_id = $1`,
+          [inv.tg_id, curseExpires]
+        )
+        await client.query(
+          `UPDATE burn_invoices
+              SET processed = TRUE
+            WHERE invoice_id = $1`,
+          [invoiceId]
+        )
+        await client.query('COMMIT')
+        return {
+          newFragment: null,
+          cursed: true,
+          curse_expires: curseExpires.toISOString()
+        }
       }
     }
 
-    // 4) Otherwise, pick a random new fragment if any remain
-    const remaining = FRAGMENT_IDS.filter(id => !ownedFragments.includes(id))
-    const pick = remaining.length
-      ? remaining[crypto.randomInt(remaining.length)]
+    // 3) иначе выдаём фрагмент (если они ещё есть)
+    const available = FRAGS.filter(f => !owned.includes(f))
+    const pick = available.length
+      ? available[crypto.randomInt(available.length)]
       : null
 
     if (pick === null) {
-      // No new fragment available → just update last_burn timestamp for cooldown
+      // место для логики, если фрагментов не осталось
       await client.query(
         `UPDATE players
             SET last_burn = NOW()
           WHERE tg_id = $1`,
-        [invoice.tg_id]
+        [inv.tg_id]
       )
     } else {
-      // Grant the chosen fragment
       await client.query(
         `UPDATE players
-            SET fragments = array_append(fragments, $2::int),
-                last_burn  = NOW()
+            SET fragments  = array_append(fragments,$2::int),
+                last_burn   = NOW()
           WHERE tg_id = $1`,
-        [invoice.tg_id, pick]
+        [inv.tg_id, pick]
       )
     }
 
-    // 5) Mark the invoice as processed
+    // 4) отмечаем инвойс как обработанный
     await client.query(
       `UPDATE burn_invoices
           SET processed = TRUE
@@ -157,22 +148,20 @@ async function runBurnLogic(invoiceId) {
 
     await client.query('COMMIT')
     return { newFragment: pick, cursed: false, curse_expires: null }
-  } catch (error) {
+  } catch (e) {
     await client.query('ROLLBACK')
-    console.error('Error in runBurnLogic:', error)
-    throw error
+    console.error('[runBurnLogic]', e)
+    throw e
   } finally {
     client.release()
   }
 }
 
-// ────────────────────────────────────────────────────────────────
-// Public routes (no authentication required):
-// ────────────────────────────────────────────────────────────────
+// ── PUBLIC ROUTES ─────────────────────────────────────────────────────
 
 /**
  * POST /api/init
- * Register a new player or return existing, then issue JWT.
+ * Register player + bump total_users
  */
 router.post('/init', async (req, res) => {
   const { tg_id, name = '', initData = '', referrer_code = null } = req.body
@@ -180,50 +169,45 @@ router.post('/init', async (req, res) => {
     return res.status(400).json({ error: 'tg_id and initData required' })
   }
   try {
-    // Check if player already exists
     const { rows } = await pool.query(
-      `SELECT 1 FROM players WHERE tg_id = $1`,
-      [tg_id]
+      `SELECT 1 FROM players WHERE tg_id = $1`, [tg_id]
     )
-    let playerRecord
-    if (rows.length === 0) {
-      // New player → insert
+    let player
+    if (!rows.length) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
-        const code = await generateUniqueReferralCode()
-        const { rows: [newPlayer] } = await client.query(
+        const code = await genUniqueCode()
+        const { rows: [me] } = await client.query(
           `INSERT INTO players
-             (tg_id, name, is_cursed, curses_count, curse_expires, ref_code, referral_reward_issued)
-           VALUES ($1, $2, FALSE, 0, NULL, $3, FALSE)
+             (tg_id,name,is_cursed,curses_count,curse_expires,ref_code,referral_reward_issued)
+           VALUES ($1,$2,FALSE,0,NULL,$3,FALSE)
            RETURNING *`,
-          [tg_id, name.trim() || null, code]
+          [tg_id, name.trim()||null, code]
         )
         if (referrer_code) {
-          // Handle referral
-          const { rows: [referrer] } = await client.query(
-            `SELECT tg_id FROM players WHERE ref_code = $1 LIMIT 1`,
+          const { rows: [ref] } = await client.query(
+            `SELECT tg_id FROM players WHERE ref_code=$1 LIMIT 1`,
             [referrer_code.trim()]
           )
-          if (!referrer) {
+          if (!ref) {
             await client.query('ROLLBACK')
             return res.status(400).json({ error: 'Invalid referral code' })
           }
           await client.query(
             `INSERT INTO referrals
-               (referrer_id, referred_id, status)
-             VALUES ($1, $2, 'confirmed')`,
-            [referrer.tg_id, tg_id]
+               (referrer_id,referred_id,status)
+             VALUES ($1,$2,'confirmed')`,
+            [ref.tg_id, tg_id]
           )
         }
-        // Increment global stats
         await client.query(
           `UPDATE global_stats
               SET value = value + 1
             WHERE id = 'total_users'`
         )
         await client.query('COMMIT')
-        playerRecord = newPlayer
+        player = me
       } catch (e) {
         await client.query('ROLLBACK')
         throw e
@@ -231,51 +215,41 @@ router.post('/init', async (req, res) => {
         client.release()
       }
     } else {
-      // Existing player → fetch
-      const { rows: [existingPlayer] } = await pool.query(
-        `SELECT * FROM players WHERE tg_id = $1 LIMIT 1`,
-        [tg_id]
+      const { rows: [me] } = await pool.query(
+        `SELECT * FROM players WHERE tg_id=$1 LIMIT 1`, [tg_id]
       )
-      playerRecord = existingPlayer
+      player = me
     }
-    // Issue JWT
-    const token = signToken(playerRecord)
-    return res.json({ user: playerRecord, token })
-  } catch (error) {
-    console.error('Error in /api/init:', error)
+    return res.json({ user: player, token: sign(player) })
+  } catch (e) {
+    console.error('[init]', e)
     return res.status(500).json({ error: 'internal' })
   }
 })
 
 /**
  * GET /api/player/:tg_id
- * Return player profile and referral count.
  */
 router.get('/player/:tg_id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT tg_id, name, fragments, last_burn, is_cursed,
-              curse_expires, curses_count, ref_code, referral_reward_issued
+      `SELECT tg_id,name,fragments,last_burn,is_cursed,
+              curse_expires,curses_count,ref_code,referral_reward_issued
          FROM players
-        WHERE tg_id = $1
+        WHERE tg_id=$1
         LIMIT 1`,
       [req.params.tg_id]
     )
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'player not found' })
-    }
-    const player = rows[0]
-    const { rows: [countRow] } = await pool.query(
+    if (!rows.length) return res.status(404).json({ error: 'player not found' })
+    const { rows: [c] } = await pool.query(
       `SELECT COUNT(*) AS cnt
          FROM referrals
-        WHERE referrer_id = $1
-          AND status = 'confirmed'`,
+        WHERE referrer_id=$1 AND status='confirmed'`,
       [req.params.tg_id]
     )
-    const invitedCount = Number(countRow.cnt)
-    return res.json({ ...player, invitedCount })
-  } catch (error) {
-    console.error('Error in /api/player/:tg_id:', error)
+    return res.json({ ...rows[0], invitedCount: Number(c.cnt) })
+  } catch (e) {
+    console.error('[player]', e)
     return res.status(500).json({ error: 'internal' })
   }
 })
