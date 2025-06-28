@@ -98,7 +98,7 @@ async function runBurnLogic(invoiceId) {
     // 3) If all mandatory fragments are owned and player is not yet cursed → issue curse
     const hasAllMandatory = MANDATORY_IDS.every(id => ownedFragments.includes(id))
     if (hasAllMandatory && !alreadyCursed) {
-      const curseDurationMs = 60 * 60 * 1000  // 1 hour
+      const curseDurationMs = 2 * 60 * 1000  // 1 hour
       const curseExpires    = new Date(Date.now() + curseDurationMs)
       await client.query(
         `UPDATE players
