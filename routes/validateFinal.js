@@ -1,3 +1,4 @@
+// src/routes/validateFinal.js
 import express from 'express';
 import jwt     from 'jsonwebtoken';
 import pool    from '../db.js';
@@ -20,16 +21,20 @@ router.use(authenticate);
 
 /**
  * POST /api/validate-final
- * Проверяет, что сейчас «окно» для ввода финальной фразы (раз в сутки в ту же минуту),
- * что у пользователя уже собрано 8 фрагментов,
- * и что введённая фраза === `${TEMPLATE}-${nickname}`.
+ * Проверяет:
+ * 1) что окно для ввода открыто (одноразово в ту же час и минуту),
+ * 2) что у пользователя уже собрано 8 фрагментов,
+ * 3) что введённая фраза равна `${TEMPLATE}-${nickname}` (без учёта регистра).
  */
 router.post('/', async (req, res) => {
   const { userId, inputPhrase } = req.body;
   if (!userId || !inputPhrase) {
-    return res.status(400).json({ ok: false, error: 'Missing userId or inputPhrase' });
+    return res
+      .status(400)
+      .json({ ok: false, error: 'Missing userId or inputPhrase' });
   }
-  // Дополнительная проверка: tg_id из JWT должен совпадать с userId из тела
+
+  // Проверяем, что токен принадлежит этому userId
   if (String(req.user.tg_id) !== String(userId)) {
     return res.status(403).json({ ok: false, error: 'Forbidden' });
   }
@@ -44,20 +49,24 @@ router.post('/', async (req, res) => {
       [userId]
     );
     if (!rows.length) {
-      return res.status(404).json({ ok: false, error: 'User not found' });
+      return res
+        .status(404)
+        .json({ ok: false, error: 'User not found' });
     }
 
     const { name, created_at, fragments } = rows[0];
     const created = new Date(created_at);
     const now     = new Date();
 
-    // Проверяем, что текущее время в тот же час и минуту, что и регистрация
+    // Проверяем «окно» по времени: та же час и минута
     const windowOpen =
          created.getHours()   === now.getHours()
       && created.getMinutes() === now.getMinutes();
 
-    // Доступ есть только если окно открыто и уже получено 8 фрагментов
-    if (!windowOpen || (fragments || []).length !== 8) {
+    // Проверяем, что собраны все 8 фрагментов
+    const hasAllFragments = Array.isArray(fragments) && fragments.length === 8;
+
+    if (!windowOpen || !hasAllFragments) {
       return res.status(400).json({
         ok:    false,
         error: 'Time window for final phrase has expired or fragments missing'
@@ -68,18 +77,27 @@ router.post('/', async (req, res) => {
     const template = (process.env.FINAL_PHRASE_TEMPLATE || '').trim();
     const expected = `${template}-${name}`.trim();
 
-    if (inputPhrase.trim() !== expected) {
-      return res.status(400).json({ ok: false, error: 'Incorrect final phrase' });
+    // Логируем, что пришло и что ожидаем
+    console.log('[VALIDATE-FINAL] inputPhrase:', JSON.stringify(inputPhrase));
+    console.log('[VALIDATE-FINAL] expected   :', JSON.stringify(expected));
+
+    // Сравниваем без учёта регистра и лишних пробелов
+    if (inputPhrase.trim().toLowerCase() !== expected.toLowerCase()) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Incorrect final phrase' });
     }
 
-    // Всё ок — выдаём новый токен и ответ { ok:true }
+    // Успех — выдаём новый токен и { ok: true }
     const newToken = generateToken(req.user);
     res.setHeader('Authorization', `Bearer ${newToken}`);
     return res.json({ ok: true });
 
   } catch (err) {
-    console.error('[VALIDATE FINAL ERROR]', err);
-    return res.status(500).json({ ok: false, error: 'Internal server error' });
+    console.error('[VALIDATE-FINAL ERROR]', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: 'Internal server error' });
   }
 });
 
