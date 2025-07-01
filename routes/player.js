@@ -85,7 +85,7 @@ async function runBurnLogic(invoiceId) {
       const pCurse         = cursesLeft / (fragsLeft + cursesLeft);
       if (Math.random() < pCurse) {
         // выдаём проклятие на 1 час (для 2 минут поменяйте 60*60*1000 → 2*60*1000)
-        const curseExpires = new Date(Date.now() + 60*60*1000);
+        const curseExpires = new Date(Date.now() + 2*60*1000);
         await client.query(
           `UPDATE players
               SET is_cursed     = TRUE,
