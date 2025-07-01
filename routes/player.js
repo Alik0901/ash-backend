@@ -248,8 +248,28 @@ router.get('/player/:tg_id', async (req, res) => {
   }
 });
 
-//Проверяет, время создания аккаунта
+//Проверяет, собрал ли пользователь все 8 фрагментов
 //
+router.get('/final/:tg_id', authenticate, async (req, res) => {
+  try {
+    const tg_id = req.params.tg_id;
+    const { rows: [pl] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id = $1`,
+      [tg_id]
+    );
+    if (!pl) return res.status(404).json({ error: 'player not found' });
+    const gotAll = (pl.fragments || []).length === 8;
+    return res.json({ canEnter: gotAll });
+  } catch (e) {
+    console.error('Error in GET /api/final/:tg_id', e);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+
+ //Раз в сутки, ровно в ту минуту, когда пользователь зарегистрировался,
+//возвращает { canEnter: true } на протяжении 60 секунд.
+/*
 router.get('/final/:tg_id', authenticate, async (req, res) => {
   try {
     // Получаем время создания аккаунта
@@ -284,6 +304,7 @@ router.get('/final/:tg_id', authenticate, async (req, res) => {
     return res.status(500).json({ error: 'internal' });
   }
 });
+*/
 
 // ── PROTECTED ────────────────────────────────────────────────────
 router.use(authenticate);
