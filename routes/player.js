@@ -1,20 +1,20 @@
 // src/routes/player.js
-import express        from 'express';
-import crypto         from 'crypto';
-import jwt            from 'jsonwebtoken';
+import express from 'express';
+import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import { v4 as uuid } from 'uuid';
-import pool           from '../db.js';
+import pool from '../db.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 const { JWT_SECRET, TON_WALLET_ADDRESS: TON_ADDR } = process.env;
 
-const TONHUB_URL      = 'https://tonhub.com/transfer';
+const TONHUB_URL = 'https://tonhub.com/transfer';
 const TONSPACE_SCHEME = 'ton://transfer';
-const AMOUNT_NANO     = 500_000_000; // 0.5 TON в нано
-const FRAGS           = [1,2,3,4,5,6,7,8];
-const MANDATORY       = [1,2,3];           // три обязательных фрагмента
-const MAX_CURSES      = MANDATORY.length;  // сколько всего проклятий нужно выдать
+const AMOUNT_NANO = 500_000_000; // 0.5 TON в нано
+const FRAGS = [1, 2, 3, 4, 5, 6, 7, 8];
+const MANDATORY = [1, 2, 3];           // три обязательных фрагмента
+const MAX_CURSES = MANDATORY.length;  // сколько всего проклятий нужно выдать
 
 /** Генерация и подпись JWT */
 function sign(user) {
@@ -73,19 +73,19 @@ async function runBurnLogic(invoiceId) {
         FOR UPDATE`,
       [inv.tg_id]
     );
-    const owned       = pl.fragments || [];
-    const cursesSoFar = pl.curses_count  || 0;
+    const owned = pl.fragments || [];
+    const cursesSoFar = pl.curses_count || 0;
     const hasAllMandatory = MANDATORY.every(id => owned.includes(id));
 
     // 3) если обязательные есть, и ещё не выдано все проклятия — выдаём их рандомно
     if (hasAllMandatory && cursesSoFar < MAX_CURSES) {
       const availableFrags = FRAGS.filter(f => !owned.includes(f));
-      const fragsLeft      = availableFrags.length;
-      const cursesLeft     = MAX_CURSES - cursesSoFar;
-      const pCurse         = cursesLeft / (fragsLeft + cursesLeft);
+      const fragsLeft = availableFrags.length;
+      const cursesLeft = MAX_CURSES - cursesSoFar;
+      const pCurse = cursesLeft / (fragsLeft + cursesLeft);
       if (Math.random() < pCurse) {
         // выдаём проклятие на 1 час (для 2 минут поменяйте 60*60*1000 → 2*60*1000)
-        const curseExpires = new Date(Date.now() + 2*60*1000);
+        const curseExpires = new Date(Date.now() + 2 * 60 * 1000);
         await client.query(
           `UPDATE players
               SET is_cursed     = TRUE,
@@ -177,7 +177,7 @@ router.post('/init', async (req, res) => {
              (tg_id,name,is_cursed,curses_count,curse_expires,ref_code,referral_reward_issued)
            VALUES ($1,$2,FALSE,0,NULL,$3,FALSE)
            RETURNING *`,
-          [tg_id, name.trim()||null, code]
+          [tg_id, name.trim() || null, code]
         );
         if (referrer_code) {
           const { rows: [ref] } = await client.query(
@@ -248,6 +248,24 @@ router.get('/player/:tg_id', async (req, res) => {
   }
 });
 
+//Проверяет, собрал ли пользователь все 8 фрагментов
+//
+router.get('/final/:tg_id', authenticate, async (req, res) => {
+  try {
+    const tg_id = req.params.tg_id;
+    const { rows: [pl] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id = $1`,
+      [tg_id]
+    );
+    if (!pl) return res.status(404).json({ error: 'player not found' });
+    const gotAll = (pl.fragments || []).length === 8;
+    return res.json({ canEnter: gotAll });
+  } catch (e) {
+    console.error('Error in GET /api/final/:tg_id', e);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
 // ── PROTECTED ────────────────────────────────────────────────────
 router.use(authenticate);
 
@@ -292,7 +310,7 @@ router.post('/burn-invoice', async (req, res) => {
   if (!tg_id) return res.status(400).json({ error: 'tg_id required' });
   try {
     const invoiceId = uuid();
-    const comment   = crypto.randomBytes(4).toString('hex');
+    const comment = crypto.randomBytes(4).toString('hex');
     await pool.query(
       `INSERT INTO burn_invoices
          (invoice_id,tg_id,amount_nano,address,comment,status,created_at)
@@ -301,7 +319,7 @@ router.post('/burn-invoice', async (req, res) => {
     );
     return res.json({
       invoiceId,
-      paymentUrl:  `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
+      paymentUrl: `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
       tonspaceUrl: `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`
     });
   } catch (e) {
@@ -380,20 +398,20 @@ router.post('/referral/claim', async (req, res) => {
     if (Number(c.cnt) < 3) {
       return res.status(400).json({ error: 'Not enough invited users' });
     }
-    const owned     = p.fragments || [];
+    const owned = p.fragments || [];
     const available = FRAGS.filter(f => !owned.includes(f));
-    const pick      = available.length
-                      ? available[crypto.randomInt(available.length)]
-                      : null;
+    const pick = available.length
+      ? available[crypto.randomInt(available.length)]
+      : null;
     await pool.query(
       `UPDATE players
          SET fragments=array_append(fragments,$2::int),
              referral_reward_issued=TRUE
        WHERE tg_id=$1`,
-      [tg_id,pick]
+      [tg_id, pick]
     );
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
-    return res.json({ ok:true, fragment: pick });
+    return res.json({ ok: true, fragment: pick });
   } catch (e) {
     console.error('[referral claim]', e);
     return res.status(500).json({ error: 'internal' });
