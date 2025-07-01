@@ -19,7 +19,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 const app = express();
-// Чтобы express-rate-limit видел реальный IP за прокси
+// доверяем proxy (чтобы rate-limit правильно определял IP)
 app.set('trust proxy', 1);
 
 // ─── 1) Общий middleware ────────────────────────────────────────────
@@ -33,18 +33,17 @@ const ALLOWED = [
   /\.telegram\.org$/,
   /\.up\.railway\.app$/
 ];
-const corsOptions = {
+app.use('/api', cors({
   origin(origin, cb) {
-    if (!origin || ALLOWED.some(x => x instanceof RegExp ? x.test(origin) : x === origin)) {
+    if (!origin) return cb(null, true);
+    if (ALLOWED.some(x => x instanceof RegExp ? x.test(origin) : x === origin))
       return cb(null, true);
-    }
     cb(new Error(`CORS blocked: ${origin}`));
   },
   methods: ['GET','POST','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization']
-};
-app.use('/api', cors(corsOptions));
-app.options('/api/*', cors(corsOptions));
+}));
+app.options('/api/*', cors());
 
 // ─── 3) Rate limiter для validate и validate-final ─────────────────
 const validateLimiter = rateLimit({
@@ -55,11 +54,11 @@ const validateLimiter = rateLimit({
   message: { error: 'Too many requests, please try later.' },
 });
 
-// ─── 4) Public routes (без auth) ──────────────────────────────────
-// перепроверка кода из validate.js
+// ─── 4) Public routes (без аутентификации) ─────────────────────────
+// простой проверочный роут из validate.js
 app.use('/api/validate', validateLimiter, validateRoute);
 
-// проверка финальной фразы
+// роут проверки финальной фразы
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
 // ─── 5) Presigned URLs для фрагментов ──────────────────────────────
@@ -72,40 +71,48 @@ const FRAG_FILES = [
   'fragment_5_the_chain.jpg',
   'fragment_6_the_hour.jpg',
   'fragment_7_the_mark.jpg',
-  'fragment_8_the_gate.jpg'
+  'fragment_8_the_gate.jpg',
 ];
-const FINAL_FILE = 'final-image.jpg';
-const HMAC_SECRET = process.env.FRAG_HMAC_SECRET;
+const FINAL_FILE   = 'final-image.jpg';
+const HMAC_SECRET  = process.env.FRAG_HMAC_SECRET;
 if (!HMAC_SECRET) console.error('⚠️ FRAG_HMAC_SECRET is not set');
 
-app.get('/api/fragments/urls', authenticate, (req, res) => {
-  try {
-    const TTL = 5 * 60 * 1000;
-    const now = Date.now();
-    const signedUrls = {};
+app.get(
+  '/api/fragments/urls',
+  authenticate,
+  (req, res) => {
+    try {
+      const TTL = 5 * 60 * 1000;
+      const now = Date.now();
+      const signedUrls = {};
 
-    for (const name of [...FRAG_FILES, FINAL_FILE]) {
-      const exp     = now + TTL;
-      const payload = `${name}|${exp}`;
-      const sig     = crypto.createHmac('sha256', HMAC_SECRET)
-                            .update(payload)
-                            .digest('hex');
-      signedUrls[name] = `${req.protocol}://${req.get('host')}` +
-                         `/fragments/${encodeURIComponent(name)}` +
-                         `?exp=${exp}&sig=${sig}`;
+      for (const name of [...FRAG_FILES, FINAL_FILE]) {
+        const exp     = now + TTL;
+        const payload = `${name}|${exp}`;
+        const sig     = crypto
+          .createHmac('sha256', HMAC_SECRET)
+          .update(payload)
+          .digest('hex');
+
+        signedUrls[name] = `${req.protocol}://${req.get('host')}` +
+          `/fragments/${encodeURIComponent(name)}` +
+          `?exp=${exp}&sig=${sig}`;
+      }
+
+      res.json({ signedUrls });
+    } catch (err) {
+      console.error('[ERROR fragments/urls]', err);
+      res.status(500).json({ error: 'internal' });
     }
-    res.json({ signedUrls });
-  } catch (err) {
-    console.error('[ERROR fragments/urls]', err);
-    res.status(500).json({ error: 'internal' });
   }
-});
+);
 
-// ─── 6) Auth для всех остальных /api ────────────────────────────────
+// ─── 6) Auth для всех остальных /api ─────────────────────────────────
 app.use('/api', (req, res, next) => {
-  if (req.method === 'OPTIONS')         return next();
-  if (req.method === 'POST' && req.path === '/init') return next();
-  if (req.method === 'GET'  && /^\/player\/[^/]+$/.test(req.path)) return next();
+  if (req.method === 'OPTIONS')                              return next();
+  if (req.method === 'POST'   && req.path === '/init')       return next();
+  if (req.method === 'GET'    && /^\/player\/[^/]+$/.test(req.path))
+    return next();
   return authenticate(req, res, next);
 });
 
@@ -123,9 +130,10 @@ app.get('/fragments/:name', (req, res, next) => {
     return res.status(403).json({ error: 'Link expired' });
   }
 
-  const expected = crypto.createHmac('sha256', HMAC_SECRET)
-                         .update(`${name}|${exp}`)
-                         .digest('hex');
+  const expected = crypto
+    .createHmac('sha256', HMAC_SECRET)
+    .update(`${name}|${exp}`)
+    .digest('hex');
   if (sig !== expected) {
     return res.status(403).json({ error: 'Invalid signature' });
   }
