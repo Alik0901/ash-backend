@@ -1,13 +1,13 @@
 // routes/validateFinal.js
-import express           from 'express';
-import jwt               from 'jsonwebtoken';
-import pool              from '../db.js';
-import { authenticate }  from '../middleware/auth.js';
+import express          from 'express';
+import jwt              from 'jsonwebtoken';
+import pool             from '../db.js';
+import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
 
-/** Генерируем новый JWT */
+/** Генерация нового JWT */
 function generateToken(user) {
   return jwt.sign(
     { tg_id: user.tg_id, name: user.name },
@@ -22,14 +22,18 @@ router.use(authenticate);
 router.post('/', async (req, res) => {
   const { userId, inputPhrase } = req.body;
   if (!userId || !inputPhrase) {
-    return res.status(400).json({ ok: false, error: 'Missing userId or inputPhrase' });
+    return res
+      .status(400)
+      .json({ ok: false, error: 'Missing userId or inputPhrase' });
   }
+
+  // токен и тело должны совпадать
   if (String(req.user.tg_id) !== String(userId)) {
     return res.status(403).json({ ok: false, error: 'Forbidden' });
   }
 
   try {
-    // достаём имя, created_at и fragments
+    // достаём name, created_at и fragments
     const { rows } = await pool.query(
       `SELECT name, created_at, fragments
          FROM players
@@ -45,7 +49,7 @@ router.post('/', async (req, res) => {
     const created = new Date(created_at);
     const now     = new Date();
 
-    // окно: тот же час и та же минута
+    // окно: совпадает час и минута
     const windowOpen =
       created.getHours()   === now.getHours() &&
       created.getMinutes() === now.getMinutes();
@@ -59,23 +63,22 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // собираем ожидаемую строку
+    // ожидаемая строка
     const template = (process.env.FINAL_PHRASE_TEMPLATE || '').trim();
     const expected = `${template}-${name}`.trim();
 
-    // логируем для дебага
+    // логи для дебага
     console.log('[VALIDATE-FINAL] received:', JSON.stringify(inputPhrase));
-    console.log('[VALIDATE-FINAL] expected:', JSON.stringify(expected));
+    console.log('[VALIDATE-FINAL] expected:',  JSON.stringify(expected));
 
     // сравниваем без учёта регистра
     if (inputPhrase.trim().toLowerCase() !== expected.toLowerCase()) {
-      console.log('[VALIDATE-FINAL] MISMATCH received vs expected');
+      console.log('[VALIDATE-FINAL] MISMATCH');
       return res.status(400).json({ ok: false, error: 'Incorrect final phrase' });
     }
 
-    // успех! отдаем новый токен
-    const newToken = generateToken(req.user);
-    res.setHeader('Authorization', `Bearer ${newToken}`);
+    // успех — новый токен и ok:true
+    res.setHeader('Authorization', `Bearer ${generateToken(req.user)}`);
     return res.json({ ok: true });
 
   } catch (err) {

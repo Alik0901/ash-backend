@@ -19,17 +19,15 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 const app = express();
-
-// ─── 1) Настройки ────────────────────────────────────────────────────
-// Включаем доверие к proxy (Railway, Vercel и т.п.), чтобы rate-limit правильно видел IP
+// Чтобы express-rate-limit видел реальный IP за прокси
 app.set('trust proxy', 1);
 
-// ─── 2) Global middleware ────────────────────────────────────────────
+// ─── 1) Общий middleware ────────────────────────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10kb' }));
 
-// ─── 3) CORS (применяется ко всем /api и к предзапросам) ──────────────
+// ─── 2) CORS для всех /api ──────────────────────────────────────────
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/,
@@ -48,41 +46,23 @@ const corsOptions = {
 app.use('/api', cors(corsOptions));
 app.options('/api/*', cors(corsOptions));
 
-// ─── 4) Rate-limit для валидации (shared) ───────────────────────────
+// ─── 3) Rate limiter для validate и validate-final ─────────────────
 const validateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,  // 15 минут
+  windowMs: 15 * 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try later.' },
 });
 
-// ─── 5) Public routes (без авторизации) ─────────────────────────────
-// POST /api/init
-app.use('/api/validate',       validateLimiter, validateRoute);
-// затем, когда подключите init.js – аналогично
+// ─── 4) Public routes (без auth) ──────────────────────────────────
+// перепроверка кода из validate.js
+app.use('/api/validate', validateLimiter, validateRoute);
 
-// ─── 6) Protected routes ────────────────────────────────────────────
-// аутентификация для всего остального /api
-app.use('/api', (req, res, next) => {
-  if (req.method === 'OPTIONS') return next();
-  if (req.method === 'POST' && req.path === '/init') return next();
-  if (req.method === 'GET' && /^\/player\/[^/]+$/.test(req.path)) return next();
-  return authenticate(req, res, next);
-});
+// проверка финальной фразы
+app.use('/api/validate-final', validateLimiter, validateFinalRoute);
 
-// GET /api/player/:tg_id и остальные игровые маршруты
-app.use('/api', playerRoutes);
-
-// POST /api/validate-final
-// предзапрос уже отработает глобальный CORS и OPTIONS в пункте 3
-app.post(
-  '/api/validate-final',
-  validateLimiter,
-  validateFinalRoute
-);
-
-// ─── 7) Presigned URLs для фрагментов ────────────────────────────────
+// ─── 5) Presigned URLs для фрагментов ──────────────────────────────
 const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
 const FRAG_FILES = [
   'fragment_1_the_whisper.jpg',
@@ -103,6 +83,7 @@ app.get('/api/fragments/urls', authenticate, (req, res) => {
     const TTL = 5 * 60 * 1000;
     const now = Date.now();
     const signedUrls = {};
+
     for (const name of [...FRAG_FILES, FINAL_FILE]) {
       const exp     = now + TTL;
       const payload = `${name}|${exp}`;
@@ -120,35 +101,49 @@ app.get('/api/fragments/urls', authenticate, (req, res) => {
   }
 });
 
-// ─── 8) Раздача фрагментов по HMAC ────────────────────────────────────
+// ─── 6) Auth для всех остальных /api ────────────────────────────────
+app.use('/api', (req, res, next) => {
+  if (req.method === 'OPTIONS')         return next();
+  if (req.method === 'POST' && req.path === '/init') return next();
+  if (req.method === 'GET'  && /^\/player\/[^/]+$/.test(req.path)) return next();
+  return authenticate(req, res, next);
+});
+
+// ─── 7) Основные игровые маршруты ──────────────────────────────────
+app.use('/api', playerRoutes);
+
+// ─── 8) Раздача HMAC-файлов (фрагменты) ────────────────────────────
 app.get('/fragments/:name', (req, res, next) => {
   const { name } = req.params;
-  if (![...FRAG_FILES].includes(name)) return next();
+  if (!FRAG_FILES.includes(name)) return next();
+
   const exp = Number(req.query.exp || 0);
   const sig = req.query.sig || '';
   if (Date.now() > exp) {
     return res.status(403).json({ error: 'Link expired' });
   }
+
   const expected = crypto.createHmac('sha256', HMAC_SECRET)
                          .update(`${name}|${exp}`)
                          .digest('hex');
   if (sig !== expected) {
     return res.status(403).json({ error: 'Invalid signature' });
   }
+
   res.set('Access-Control-Allow-Origin','*');
   res.set('Cross-Origin-Resource-Policy','cross-origin');
   res.sendFile(path.join(FRAG_DIR, name));
 });
 
-// ─── 9) Статика для финального рисунка ───────────────────────────────
+// ─── 9) Статика для финального изображения ──────────────────────────
 app.get(`/fragments/${FINAL_FILE}`, (_req, res) => {
   res.set('Access-Control-Allow-Origin','*');
   res.set('Cross-Origin-Resource-Policy','cross-origin');
   res.sendFile(path.join(FRAG_DIR, FINAL_FILE));
 });
 
-// ─── 10) Health-check и запуск ───────────────────────────────────────
+// ─── 10) Health-check и старт ───────────────────────────────────────
 app.get('/', (_req, res) => res.sendStatus(200));
-const PORT = parseInt(process.env.PORT||'3000', 10);
+const PORT = parseInt(process.env.PORT || '3000', 10);
 console.log('🟢 Server listening on port', PORT);
 app.listen(PORT, '0.0.0.0');
