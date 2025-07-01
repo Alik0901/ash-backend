@@ -248,20 +248,39 @@ router.get('/player/:tg_id', async (req, res) => {
   }
 });
 
-//Проверяет, собрал ли пользователь все 8 фрагментов
+//Проверяет, время создания аккаунта
 //
 router.get('/final/:tg_id', authenticate, async (req, res) => {
   try {
-    const tg_id = req.params.tg_id;
-    const { rows: [pl] } = await pool.query(
-      `SELECT fragments FROM players WHERE tg_id = $1`,
-      [tg_id]
+    // Получаем время создания аккаунта
+    const { rows: [player] } = await pool.query(
+      `SELECT created_at
+         FROM players
+        WHERE tg_id = $1
+        LIMIT 1`,
+      [req.params.tg_id]
     );
-    if (!pl) return res.status(404).json({ error: 'player not found' });
-    const gotAll = (pl.fragments || []).length === 8;
-    return res.json({ canEnter: gotAll });
-  } catch (e) {
-    console.error('Error in GET /api/final/:tg_id', e);
+    if (!player) {
+      return res.status(404).json({ error: 'player not found' });
+    }
+
+    const createdAt = new Date(player.created_at);
+    const now       = new Date();
+
+    // Час и минута регистрации
+    const targetHour   = createdAt.getHours();
+    const targetMinute = createdAt.getMinutes();
+
+    // Сейчас час и минута
+    const nowHour   = now.getHours();
+    const nowMinute = now.getMinutes();
+
+    // Если час и минута совпадают — окно открыто
+    const canEnter = (nowHour === targetHour && nowMinute === targetMinute);
+
+    return res.json({ canEnter });
+  } catch (err) {
+    console.error('Error in GET /api/final/:tg_id', err);
     return res.status(500).json({ error: 'internal' });
   }
 });
