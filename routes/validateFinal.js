@@ -80,14 +80,16 @@ router.post('/', async (req, res) => {
     const expected = `${template}-${name}`.trim();
 
     // Логируем для дебага
-    console.log('[VALIDATE-FINAL] received:', JSON.stringify(inputPhrase));
-    console.log('[VALIDATE-FINAL] expected:', JSON.stringify(expected));
+    console.log('[VALIDATE-FINAL] received inputPhrase:', JSON.stringify(inputPhrase));
+    console.log('[VALIDATE-FINAL] expected        :', JSON.stringify(expected));
 
     // Сравниваем «как есть» (регистр важен)
-    if (inputPhrase.trim() !== expected) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Incorrect final phrase' });
+    if (inputPhrase.trim().toLowerCase() !== expected.toLowerCase()) {
+      console.log('[VALIDATE-FINAL] MISMATCH:', {
+        received: inputPhrase.trim(),
+        expected: expected
+      });
+      return res.status(400).json({ ok: false, error: 'Incorrect final phrase' });
     }
 
     // Всё ок — выдаём новый токен и { ok: true }
