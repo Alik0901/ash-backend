@@ -78,7 +78,7 @@ async function runBurnLogic(invoiceId) {
     const hasAllMandatory = MANDATORY.every(id => owned.includes(id));
 
     // 3) если обязательные есть, и ещё не выдано все проклятия — выдаём их рандомно
-    if (hasAllMandatory && cursesSoFar < MAX_CURSES) {
+     /* if (hasAllMandatory && cursesSoFar < MAX_CURSES) {
       const availableFrags = FRAGS.filter(f => !owned.includes(f));
       const fragsLeft = availableFrags.length;
       const cursesLeft = MAX_CURSES - cursesSoFar;
@@ -107,7 +107,7 @@ async function runBurnLogic(invoiceId) {
           curse_expires: curseExpires.toISOString()
         };
       }
-    }
+    } */
 
     // 4) иначе выдаём новый фрагмент (или просто обновляем last_burn)
     const available = FRAGS.filter(f => !owned.includes(f));
