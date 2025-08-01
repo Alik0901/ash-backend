@@ -95,7 +95,10 @@ async function runBurnLogic(invoiceId) {
     if (pick !== null) {
       await client.query(
         `UPDATE players
-            SET fragments = array_append(fragments,$2::int),
+            SET fragments = array_append(
+                             coalesce(fragments, '{}'::int[]),
+                             $2::int
+                           ),
                 last_burn  = NOW()
           WHERE tg_id = $1`,
         [inv.tg_id, pick]
@@ -390,10 +393,13 @@ router.post('/referral/claim', async (req, res) => {
     const pick = available.length ? available[crypto.randomInt(available.length)] : null;
     await pool.query(
       `UPDATE players
-         SET fragments=array_append(fragments,$2::int),
-             referral_reward_issued=TRUE
-       WHERE tg_id=$1`,
-      [req.user.tg_id, pick]
+         SET fragments = array_append(
+                          coalesce(fragments, '{}'::int[]),
+                          $2::int
+                        ),
+             referral_reward_issued = TRUE
+       WHERE tg_id = $1`,
+      [tg_id, pick]
     );
     console.log('[POST /api/referral/claim] awarded fragment:', pick);
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
