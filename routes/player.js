@@ -51,7 +51,7 @@ async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    console.log('[runBurnLogic] transaction BEGIN');
+    console.log('[runBurnLogic] BEGIN');
 
     // 1) блокируем счёт
     const { rows: [inv] } = await client.query(
@@ -62,35 +62,36 @@ async function runBurnLogic(invoiceId) {
         FOR UPDATE`,
       [invoiceId]
     );
-    console.log('[runBurnLogic] invoice row:', inv);
-
+    console.log('[runBurnLogic] invoice:', inv);
     if (!inv || inv.processed) {
-      console.log('[runBurnLogic] no invoice or already processed, rolling back');
+      console.log('[runBurnLogic] nothing to do, ROLLBACK');
       await client.query('ROLLBACK');
       return { newFragment: null, cursed: false, curse_expires: null };
     }
 
     // 2) блокируем игрока
     const { rows: [pl] } = await client.query(
-      `SELECT fragments, is_cursed, curses_count
+      `SELECT fragments
          FROM players
         WHERE tg_id = $1
         FOR UPDATE`,
       [inv.tg_id]
     );
-    console.log('[runBurnLogic] player before update:', pl);
+    console.log('[runBurnLogic] player before:', pl);
     const owned = pl.fragments || [];
     console.log('[runBurnLogic] owned fragments:', owned);
 
-    // 3) проклятия отключены (оставим логику на будущее)
-    // ...
+    // 3) **отключаем проклятия полностью для теста**  
+    // (раскомментируйте и используйте дальше, когда будете проверять curses)
+    // - убираем весь код про hasAllMandatory и pCurse
 
     // 4) выдаём новый фрагмент
     const available = FRAGS.filter(f => !owned.includes(f));
+    console.log('[runBurnLogic] available fragments:', available);
     const pick = available.length
       ? available[crypto.randomInt(available.length)]
       : null;
-    console.log('[runBurnLogic] available fragments:', available, 'picked:', pick);
+    console.log('[runBurnLogic] pick:', pick);
 
     if (pick !== null) {
       await client.query(
@@ -103,30 +104,31 @@ async function runBurnLogic(invoiceId) {
           WHERE tg_id = $1`,
         [inv.tg_id, pick]
       );
-      console.log(`[runBurnLogic] appended fragment ${pick} to player ${inv.tg_id}`);
+      console.log(`[runBurnLogic] appended fragment ${pick}`);
     } else {
+      // на всякий случай, если pick=null, просто обновляем время
       await client.query(
         `UPDATE players
             SET last_burn = NOW()
           WHERE tg_id = $1`,
         [inv.tg_id]
       );
-      console.log(`[runBurnLogic] no available fragments, updated last_burn for player ${inv.tg_id}`);
+      console.log('[runBurnLogic] no pick, only updated last_burn');
     }
 
-    // 5) отмечаем инвойс как обработанный
+    // 5) помечаем инвойс как обработанный
     await client.query(
       `UPDATE burn_invoices
           SET processed = TRUE
         WHERE invoice_id = $1`,
       [invoiceId]
     );
-    console.log(`[runBurnLogic] marked invoice ${invoiceId} processed`);
+    console.log('[runBurnLogic] marked invoice processed');
 
     await client.query('COMMIT');
-    console.log('[runBurnLogic] transaction COMMIT');
-
+    console.log('[runBurnLogic] COMMIT done');
     return { newFragment: pick, cursed: false, curse_expires: null };
+
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[runBurnLogic] ERROR, rolled back', e);
