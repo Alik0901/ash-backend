@@ -479,4 +479,65 @@ router.get('/stats/:tg_id', authenticate, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/daily-quest
+ * Возвращает, доступен ли ежедневный квест и текущий купон (%).
+ */
+router.get('/daily-quest', authenticate, async (req, res) => {
+  console.log('[GET /api/daily-quest] user:', req.user.tg_id);
+  try {
+    const { rows: [p] } = await pool.query(
+      `SELECT last_daily_claim, daily_coupon_percent
+         FROM players
+        WHERE tg_id = $1`,
+      [req.user.tg_id]
+    );
+    if (!p) {
+      return res.status(404).json({ error: 'player not found' });
+    }
+    const today = new Date().toISOString().split('T')[0];
+    const canClaim = p.last_daily_claim !== today;
+    return res.json({
+      canClaim,
+      coupon: p.daily_coupon_percent
+    });
+  } catch (err) {
+    console.error('[GET /api/daily-quest] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+/**
+ * POST /api/daily-quest/claim
+ * Если ещё не заявлял сегодня — выдаёт купон и обновляет дату.
+ */
+router.post('/daily-quest/claim', authenticate, async (req, res) => {
+  console.log('[POST /api/daily-quest/claim] user:', req.user.tg_id);
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const { rows: [p] } = await pool.query(
+      `SELECT last_daily_claim FROM players WHERE tg_id = $1`,
+      [req.user.tg_id]
+    );
+    if (!p) {
+      return res.status(404).json({ error: 'player not found' });
+    }
+    if (p.last_daily_claim === today) {
+      return res.status(400).json({ error: 'Already claimed today' });
+    }
+    const couponPercent = 30; // фиксированная скидка
+    await pool.query(
+      `UPDATE players
+          SET last_daily_claim      = $2,
+              daily_coupon_percent = $3
+        WHERE tg_id = $1`,
+      [req.user.tg_id, today, couponPercent]
+    );
+    return res.json({ coupon: couponPercent });
+  } catch (err) {
+    console.error('[POST /api/daily-quest/claim] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
 export default router;
