@@ -451,4 +451,32 @@ router.delete('/player/:tg_id', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/stats/:tg_id
+ * Возвращает статистику по конкретному игроку:
+ * - totalBurns: число сжигаемых инвойсов со статусом paid
+ * - totalTon:   сумма потраченных TON (в натуральных единицах)
+ */
+router.get('/stats/:tg_id', authenticate, async (req, res) => {
+  console.log('[GET /api/stats] user:', req.params.tg_id);
+  try {
+    const { rows: [stats] } = await pool.query(
+      `SELECT
+         COUNT(b.invoice_id)          AS total_burns,
+         COALESCE(SUM(b.amount_nano), 0) AS total_ton_nano
+       FROM burn_invoices b
+      WHERE b.tg_id = $1
+        AND b.status = 'paid'`,
+      [req.params.tg_id]
+    );
+    return res.json({
+      totalBurns: Number(stats.total_burns),
+      totalTon:   Number(stats.total_ton_nano) / 1e9
+    });
+  } catch (err) {
+    console.error('[GET /api/stats] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
 export default router;
