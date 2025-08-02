@@ -396,6 +396,38 @@ router.post('/referral/claim', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/leaderboard
+ * Возвращает массив из 10 лучших игроков:
+ * [{ tg_id, name, avatar_url, total_burns, total_ton }]
+ */
+router.get('/leaderboard', authenticate, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT p.tg_id, p.name,
+             COUNT(b.invoice_id)      AS total_burns,
+             SUM(b.amount_nano)::bigint AS total_ton_nano
+        FROM players p
+        JOIN burn_invoices b ON b.tg_id = p.tg_id
+       WHERE b.status = 'paid'
+       GROUP BY p.tg_id, p.name
+       ORDER BY total_ton_nano DESC
+       LIMIT 10
+    `);
+    // преобразуем nano → TON
+    const result = rows.map(r => ({
+      tg_id: r.tg_id,
+      name: r.name,
+      totalBurns: Number(r.total_burns),
+      totalTon:   Number(r.total_ton_nano) / 1e9,
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error('[GET /api/leaderboard] ERROR:', err);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
 /** DELETE /api/player/:tg_id */
 router.delete('/player/:tg_id', async (req, res) => {
   console.log('[DELETE /api/player] user:', req.user.tg_id, 'target:', req.params.tg_id);
