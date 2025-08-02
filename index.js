@@ -11,7 +11,7 @@ import crypto      from 'crypto';
 import './worker/check-payments.js';
 import validateRoute       from './routes/validate.js';
 import validateFinalRoute  from './routes/validateFinal.js';
-import playerRoutes        from './routes/player.js';
+import playerRoutes        from './routes/player.js';  // здесь init, player/:tg_id и всё остальное
 import { authenticate }    from './middleware/auth.js';
 
 if (process.env.NODE_ENV !== 'production') dotenv.config();
@@ -19,18 +19,18 @@ if (process.env.NODE_ENV !== 'production') dotenv.config();
 const app = express();
 app.set('trust proxy', 1);
 
-// 1) HTTP headers, logging, JSON parsing
+// 1) Security, logging, JSON
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10kb' }));
 
-// 2) UI-статика (фоны, placeholder и т.д.)
+// 2) UI-Static (фоновые картинки)
 app.use(
   '/images',
   express.static(path.join(process.cwd(), 'public', 'images'))
 );
 
-// 3) CORS для /api
+// 3) CORS for /api
 const ALLOWED = [
   'https://clean-ash-order.vercel.app',
   /\.telegram\.org$/,
@@ -41,9 +41,8 @@ app.use(
   cors({
     origin(origin, cb) {
       if (!origin) return cb(null, true);
-      if (ALLOWED.some(x => x instanceof RegExp ? x.test(origin) : x === origin)) {
+      if (ALLOWED.some(x => x instanceof RegExp ? x.test(origin) : x === origin))
         return cb(null, true);
-      }
       cb(new Error(`CORS blocked: ${origin}`));
     },
     methods: ['GET','POST','DELETE','OPTIONS'],
@@ -52,38 +51,23 @@ app.use(
 );
 app.options('/api/*', cors());
 
-// 4) Rate-limit для валидации
+// 4) Rate-limit for validate
 const validateLimiter = rateLimit({
-  windowMs: 15*60_000,
+  windowMs: 15*60*1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try later.' },
 });
 
-// 5) Public API (без JWT)
-// 5.1) Валидация простых строк
+// 5) Public validation routes
 app.use('/api/validate', validateLimiter, validateRoute);
-// 5.2) Валидация финальной фразы
 app.use('/api/validate-final', validateLimiter, validateFinalRoute);
-// 5.3) Инициализация /login
-app.use('/api/init', playerRoutes);
-// 5.4) Получение данных игрока
-app.use('/api/player/:tg_id', playerRoutes);
 
-// 6) HMAC-подпись для фрагментов (URL list) — требует JWT
+// 6) Signed URLs for fragments (needs JWT)
 const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
-const FRAG_FILES = [
-  'fragment_1_the_whisper.jpg',
-  'fragment_2_the_number.jpg',
-  'fragment_3_the_language.jpg',
-  'fragment_4_the_mirror.jpg',
-  'fragment_5_the_chain.jpg',
-  'fragment_6_the_hour.jpg',
-  'fragment_7_the_mark.jpg',
-  'fragment_8_the_gate.jpg',
-];
-const FINAL_FILE  = 'final-image.jpg';
+const FRAG_FILES = [ /* ...ваш список файлов... */ ];
+const FINAL_FILE = 'final-image.jpg';
 const HMAC_SECRET = process.env.FRAG_HMAC_SECRET;
 if (!HMAC_SECRET) console.error('⚠️ FRAG_HMAC_SECRET not set');
 
@@ -92,7 +76,7 @@ app.get(
   authenticate,
   (req, res) => {
     try {
-      const TTL = 5*60_000;
+      const TTL = 5*60*1000;
       const now = Date.now();
       const signedUrls = {};
       for (const name of [...FRAG_FILES, FINAL_FILE]) {
@@ -113,42 +97,33 @@ app.get(
   }
 );
 
-// 7) JWT-middleware для всех прочих /api
-app.use('/api', (req, res, next) => {
-  if (req.method === 'OPTIONS') return next();
-  // init и player/:tg_id уже пропущены выше
-  return authenticate(req, res, next);
-});
-
-// 8) Protected API (burn, fragments retrieval, referral, final, stats…)
+// 7) Mount all game routes (init, getPlayer, burn, fragments, referral, etc.)
+//    внутри playerRoutes уже есть authenticate для защищённых маршрутов
 app.use('/api', playerRoutes);
 
-// 9) HMAC-защита и отдача файлов фрагментов
+// 8) HMAC-protected delivery of fragment files
 app.get('/fragments/:name', (req, res, next) => {
   const { name } = req.params;
   if (![...FRAG_FILES, FINAL_FILE].includes(name)) return next();
 
-  const exp = +req.query.exp || 0;
+  const exp = Number(req.query.exp || 0);
   const sig = req.query.sig || '';
-  if (Date.now() > exp) {
-    return res.status(403).json({ error: 'Link expired' });
-  }
+  if (Date.now() > exp) return res.status(403).json({ error: 'Link expired' });
+
   const expected = crypto
     .createHmac('sha256', HMAC_SECRET)
     .update(`${name}|${exp}`)
     .digest('hex');
-  if (sig !== expected) {
-    return res.status(403).json({ error: 'Invalid signature' });
-  }
+  if (sig !== expected) return res.status(403).json({ error: 'Invalid signature' });
 
   res.set('Access-Control-Allow-Origin','*');
   res.set('Cross-Origin-Resource-Policy','cross-origin');
   res.sendFile(path.join(FRAG_DIR, name));
 });
 
-// 10) Health-check
+// 9) Health-check
 app.get('/', (_req, res) => res.sendStatus(200));
 
-// 11) Старт
-const PORT = +process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🟢 Listening on ${PORT}`));
+// 10) Start server
+const PORT = Number(process.env.PORT || 3000);
+app.listen(PORT, () => console.log(`🟢 Listening on port ${PORT}`));
