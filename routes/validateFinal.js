@@ -1,8 +1,8 @@
 // файл: src/routes/validateFinal.js
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import pool from './db.js';
-import { authenticate } from './middleware/auth.js';
+import pool from '../db.js'; // скорректированный импорт: вверх из папки routes
+import { authenticate } from '../middleware/auth.js';
 import process from 'process';
 
 const router = express.Router();
