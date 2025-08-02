@@ -28,7 +28,7 @@ const CATEGORIES = {
   rare:      { ids: [6,7],    baseChance: 15 },
   legendary: { ids: [8],      baseChance: 5  },
 };
-const PITY_BOOST_PER = 1;  // +1% к Rare+Legendary за каждый неудачный burn
+const PITY_BOOST_PER = 1;  // +1% за каждый неудачный burn
 const PITY_CAP        = 20; // максимум +20%
 
 /** Генерация JWT для API */
@@ -64,6 +64,7 @@ async function genUniqueCode() {
 async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
+    console.log('[runBurnLogic] start for invoiceId:', invoiceId);
     await client.query('BEGIN');
 
     // 1) Блокируем и проверяем burn_invoice
@@ -76,6 +77,7 @@ async function runBurnLogic(invoiceId) {
       [invoiceId]
     );
     if (!inv || inv.processed) {
+      console.log('[runBurnLogic] invoice not found or already processed');
       await client.query('ROLLBACK');
       return { newFragment: null, category: null, pity_counter: null };
     }
@@ -91,6 +93,7 @@ async function runBurnLogic(invoiceId) {
     const owned       = pl.fragments || [];
     const cursesCount = pl.curses_count || 0;
     const currentPity = pl.pity_counter || 0;
+    console.log('[runBurnLogic] player state:', { owned, cursesCount, currentPity });
 
     // 3) Логика проклятий
     const mandatory = [1,2,3];
@@ -98,6 +101,7 @@ async function runBurnLogic(invoiceId) {
     const CURSE_CHANCE = 1 / 3;
     if (hasMandatory && cursesCount < 3 && Math.random() < CURSE_CHANCE) {
       const expiry = new Date(Date.now() + 60 * 60 * 1000);
+      console.log('[runBurnLogic] issuing curse');
       await client.query(
         `UPDATE players
             SET curses_count = curses_count + 1,
@@ -114,6 +118,7 @@ async function runBurnLogic(invoiceId) {
         [invoiceId]
       );
       await client.query('COMMIT');
+      console.log('[runBurnLogic] curse committed');
       return { newFragment: null, category: 'curse', pity_counter: currentPity };
     }
 
@@ -138,12 +143,14 @@ async function runBurnLogic(invoiceId) {
     } else {
       category = 'common';
     }
+    console.log('[runBurnLogic] roll result:', { r, category, boost });
 
     // 5) Выбираем конкретный фрагмент из категории
     const ids = CATEGORIES[category].ids.filter(id => !owned.includes(id));
     const pick = ids.length
       ? ids[crypto.randomInt(ids.length)]
       : null;
+    console.log('[runBurnLogic] selected pick:', pick);
 
     // 6) Обновляем pity_counter and fragments
     const newPity = (category === 'rare' || category === 'legendary') ? 0 : currentPity + 1;
@@ -164,6 +171,7 @@ async function runBurnLogic(invoiceId) {
       [invoiceId]
     );
     await client.query('COMMIT');
+    console.log('[runBurnLogic] committed successfully');
 
     return { newFragment: pick, category, pity_counter: newPity };
   } catch (err) {
@@ -174,7 +182,6 @@ async function runBurnLogic(invoiceId) {
     client.release();
   }
 }
-
 // —————————————————————————————————————————————————————————————————————————
 // 1) Публичные маршруты (до authenticate)
 // —————————————————————————————————————————————————————————————————————————
