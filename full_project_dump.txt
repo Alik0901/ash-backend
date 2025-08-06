@@ -55,7 +55,6 @@
     export default pool;
 
 ===== FILE: index.js =====
-    // index.js
     import express     from 'express';
     import helmet      from 'helmet';
     import cors        from 'cors';
@@ -64,14 +63,27 @@
     import morgan      from 'morgan';
     import path        from 'path';
     import crypto      from 'crypto';
+    import process     from 'process';
     
     import './worker/check-payments.js';
     import validateRoute       from './routes/validate.js';
     import validateFinalRoute  from './routes/validateFinal.js';
-    import playerRoutes        from './routes/player.js';  // Р·РґРµСЃСЊ init, player/:tg_id Рё РІСЃС‘ РѕСЃС‚Р°Р»СЊРЅРѕРµ
+    import playerRoutes        from './routes/player.js';
     import { authenticate }    from './middleware/auth.js';
     
+    // Load environment variables in non-prod
     if (process.env.NODE_ENV !== 'production') dotenv.config();
+    
+    // Validate critical environment variables
+    const { JWT_SECRET, FRAG_HMAC_SECRET, TON_WALLET_ADDRESS } = process.env;
+    const missing = [];
+    if (!JWT_SECRET)            missing.push('JWT_SECRET');
+    if (!FRAG_HMAC_SECRET)      missing.push('FRAG_HMAC_SECRET');
+    if (!TON_WALLET_ADDRESS)    missing.push('TON_WALLET_ADDRESS');
+    if (missing.length) {
+      console.error(`вќЊ Missing required env vars: ${missing.join(', ')}`);
+      process.exit(1);
+    }
     
     const app = express();
     app.set('trust proxy', 1);
@@ -81,7 +93,7 @@
     app.use(morgan('dev'));
     app.use(express.json({ limit: '10kb' }));
     
-    // 2) UI-Static (С„РѕРЅРѕРІС‹Рµ РєР°СЂС‚РёРЅРєРё)
+    // 2) UI-Static (background images)
     app.use(
       '/images',
       express.static(path.join(process.cwd(), 'public', 'images'))
@@ -102,15 +114,15 @@
             return cb(null, true);
           cb(new Error(`CORS blocked: ${origin}`));
         },
-        methods: ['GET','POST','DELETE','OPTIONS'],
-        allowedHeaders: ['Content-Type','Authorization'],
+        methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
       })
     );
     app.options('/api/*', cors());
     
     // 4) Rate-limit for validate
     const validateLimiter = rateLimit({
-      windowMs: 15*60*1000,
+      windowMs: 15 * 60 * 1000,
       max: 30,
       standardHeaders: true,
       legacyHeaders: false,
@@ -121,41 +133,45 @@
     app.use('/api/validate', validateLimiter, validateRoute);
     app.use('/api/validate-final', validateLimiter, validateFinalRoute);
     
-    // 6) Signed URLs for fragments (needs JWT)
+    // 6) Signed URLs for fragments (requires JWT auth)
     const FRAG_DIR   = path.join(process.cwd(), 'public', 'fragments');
-    const FRAG_FILES = [ /* ...РІР°С€ СЃРїРёСЃРѕРє С„Р°Р№Р»РѕРІ... */ ];
+    const FRAG_FILES = [
+      'fragment_1_the_whisper.jpg',
+      'fragment_2_the_number.jpg',
+      'fragment_3_the_language.jpg',
+      'fragment_4_the_mirror.jpg',
+      'fragment_5_the_chain.jpg',
+      'fragment_6_the_hour.jpg',
+      'fragment_7_the_mark.jpg',
+      'fragment_8_the_gate.jpg',
+    ];
     const FINAL_FILE = 'final-image.jpg';
-    const HMAC_SECRET = process.env.FRAG_HMAC_SECRET;
-    if (!HMAC_SECRET) console.error('вљ пёЏ FRAG_HMAC_SECRET not set');
     
-    app.get(
-      '/api/fragments/urls',
-      authenticate,
-      (req, res) => {
-        try {
-          const TTL = 5*60*1000;
-          const now = Date.now();
-          const signedUrls = {};
-          for (const name of [...FRAG_FILES, FINAL_FILE]) {
-            const exp     = now + TTL;
-            const payload = `${name}|${exp}`;
-            const sig     = crypto
-              .createHmac('sha256', HMAC_SECRET)
-              .update(payload)
-              .digest('hex');
-            signedUrls[name] = `${req.protocol}://${req.get('host')}` +
-              `/fragments/${encodeURIComponent(name)}?exp=${exp}&sig=${sig}`;
-          }
-          res.json({ signedUrls });
-        } catch (err) {
-          console.error('[fragments/urls]', err);
-          res.status(500).json({ error: 'internal' });
+    app.get('/api/fragments/urls', authenticate, (req, res) => {
+      try {
+        const TTL = 5 * 60 * 1000; // 5 minutes
+        const now = Date.now();
+        const signedUrls = {};
+    
+        for (const name of [...FRAG_FILES, FINAL_FILE]) {
+          const exp     = now + TTL;
+          const payload = `${name}|${exp}`;
+          const sig     = crypto
+            .createHmac('sha256', FRAG_HMAC_SECRET)
+            .update(payload)
+            .digest('hex');
+          signedUrls[name] = `${req.protocol}://${req.get('host')}` +
+            `/fragments/${encodeURIComponent(name)}?exp=${exp}&sig=${sig}`;
         }
-      }
-    );
     
-    // 7) Mount all game routes (init, getPlayer, burn, fragments, referral, etc.)
-    //    РІРЅСѓС‚СЂРё playerRoutes СѓР¶Рµ РµСЃС‚СЊ authenticate РґР»СЏ Р·Р°С‰РёС‰С‘РЅРЅС‹С… РјР°СЂС€СЂСѓС‚РѕРІ
+        res.json({ signedUrls });
+      } catch (err) {
+        console.error('[fragments/urls] ERROR:', err);
+        res.status(500).json({ error: 'internal' });
+      }
+    });
+    
+    // 7) Mount all game routes
     app.use('/api', playerRoutes);
     
     // 8) HMAC-protected delivery of fragment files
@@ -168,13 +184,13 @@
       if (Date.now() > exp) return res.status(403).json({ error: 'Link expired' });
     
       const expected = crypto
-        .createHmac('sha256', HMAC_SECRET)
+        .createHmac('sha256', FRAG_HMAC_SECRET)
         .update(`${name}|${exp}`)
         .digest('hex');
       if (sig !== expected) return res.status(403).json({ error: 'Invalid signature' });
     
-      res.set('Access-Control-Allow-Origin','*');
-      res.set('Cross-Origin-Resource-Policy','cross-origin');
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Cross-Origin-Resource-Policy', 'cross-origin');
       res.sendFile(path.join(FRAG_DIR, name));
     });
     
@@ -183,7 +199,9 @@
     
     // 10) Start server
     const PORT = Number(process.env.PORT || 3000);
-    app.listen(PORT, () => console.log(`рџџў Listening on port ${PORT}`));
+    app.listen(PORT, () => {
+      console.log(`рџџў Listening on port ${PORT}`);
+    });
 
 ===== FILE: middleware\auth.js =====
     // src/middleware/auth.js
@@ -1586,7 +1604,7 @@
     export default router;
 
 ===== FILE: routes\player.js =====
-    // src/routes/player.js
+    // С„Р°Р№Р»: src/routes/player.js
     import express from 'express';
     import crypto  from 'crypto';
     import jwt     from 'jsonwebtoken';
@@ -1598,18 +1616,28 @@
     const {
       JWT_SECRET,
       TON_WALLET_ADDRESS: TON_ADDR,
-      FRAG_HMAC_SECRET
+      FRAG_HMAC_SECRET,
     } = process.env;
     
+    // РђРґСЂРµСЃР° Рё СЃСѓРјРјС‹ РґР»СЏ burn
     const TONHUB_URL      = 'https://tonhub.com/transfer';
     const TONSPACE_SCHEME = 'ton://transfer';
     const AMOUNT_NANO     = 500_000_000; // 0.5 TON in nano
-    const FRAGS           = [1,2,3,4,5,6,7,8];
     
-    // вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”
-    // 1) РҐРµР»РїРµСЂС‹ Рё Р»РѕРіРёРєР° burn
-    // вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”
+    // РџРѕР»РЅС‹Р№ РїСѓР» С„СЂР°РіРјРµРЅС‚РѕРІ
+    const FRAGS = [1,2,3,4,5,6,7,8];
     
+    // РљР°С‚РµРіРѕСЂРёРё Рё Р±Р°Р·РѕРІС‹Рµ С€Р°РЅСЃС‹
+    const CATEGORIES = {
+      common:    { ids: [1,2,3], baseChance: 50 },
+      uncommon:  { ids: [4,5],    baseChance: 30 },
+      rare:      { ids: [6,7],    baseChance: 15 },
+      legendary: { ids: [8],      baseChance: 5  },
+    };
+    const PITY_BOOST_PER = 1;  // +1% Р·Р° РєР°Р¶РґС‹Р№ РЅРµСѓРґР°С‡РЅС‹Р№ burn
+    const PITY_CAP        = 20; // РјР°РєСЃРёРјСѓРј +20%
+    
+    /** Р“РµРЅРµСЂР°С†РёСЏ JWT РґР»СЏ API */
     function sign(user) {
       return jwt.sign(
         { tg_id: user.tg_id, name: user.name },
@@ -1618,10 +1646,10 @@
       );
     }
     
+    /** Р“РµРЅРµСЂР°С†РёСЏ РїСЃРµРІРґРѕСЃР»СѓС‡Р°Р№РЅРѕРіРѕ referral-РєРѕРґР° */
     function randRef() {
       return crypto.randomBytes(6).toString('base64url');
     }
-    
     async function genUniqueCode() {
       for (let i = 0; i < 8; i++) {
         const code = randRef();
@@ -1635,175 +1663,209 @@
     }
     
     /**
-     * РћСЃРЅРѕРІРЅР°СЏ Р»РѕРіРёРєР° РІС‹РґР°С‡Рё С„СЂР°РіРјРµРЅС‚Р° РїРѕСЃР»Рµ РѕРїР»Р°С‚С‹
+     * РћСЃРЅРѕРІРЅР°СЏ Р»РѕРіРёРєР° "burn" СЃ СѓС‡С‘С‚РѕРј РїСЂРѕРєР»СЏС‚РёР№ Рё РґРёРЅР°РјРёС‡РµСЃРєРёС… С€Р°РЅСЃРѕРІ
+     * @param {string} invoiceId
+     * @returns {{newFragment: number|null, category: string, pity_counter: number}}
      */
     async function runBurnLogic(invoiceId) {
-      console.log('[runBurnLogic] begin for', invoiceId);
       const client = await pool.connect();
       try {
+        console.log('[runBurnLogic] start for invoiceId:', invoiceId);
         await client.query('BEGIN');
     
-        // 1) Р·Р°Р±РёСЂР°РµРј РёРЅРІРѕР№СЃ
+        // 1) Р‘Р»РѕРєРёСЂСѓРµРј Рё РїСЂРѕРІРµСЂСЏРµРј burn_invoice
         const { rows: [inv] } = await client.query(
           `SELECT tg_id, processed
              FROM burn_invoices
-            WHERE invoice_id=$1
-              AND status='paid'
+            WHERE invoice_id = $1
+              AND status = 'paid'
             FOR UPDATE`,
           [invoiceId]
         );
         if (!inv || inv.processed) {
+          console.log('[runBurnLogic] invoice not found or already processed');
           await client.query('ROLLBACK');
-          return { newFragment: null, cursed: false, curse_expires: null };
+          return { newFragment: null, category: null, pity_counter: null };
         }
     
-        // 2) Р·Р°Р±РёСЂР°РµРј РёРіСЂРѕРєР°
+        // 2) Р‘Р»РѕРєРёСЂСѓРµРј РёРіСЂРѕРєР° Рё С‡РёС‚Р°РµРј СЃРѕСЃС‚РѕСЏРЅРёРµ
         const { rows: [pl] } = await client.query(
-          `SELECT fragments FROM players WHERE tg_id=$1 FOR UPDATE`,
+          `SELECT fragments, curses_count, pity_counter
+             FROM players
+            WHERE tg_id = $1
+            FOR UPDATE`,
           [inv.tg_id]
         );
-        const owned = pl.fragments || [];
+        const owned       = pl.fragments || [];
+        const cursesCount = pl.curses_count || 0;
+        const currentPity = pl.pity_counter || 0;
+        console.log('[runBurnLogic] player state:', { owned, cursesCount, currentPity });
     
-        // 3) РІС‹РґР°С‘Рј РЅРѕРІС‹Р№ С„СЂР°РіРјРµРЅС‚
-        const available = FRAGS.filter(f => !owned.includes(f));
-        const pick = available.length
-          ? available[crypto.randomInt(available.length)]
-          : null;
-    
-        if (pick !== null) {
+        // 3) Р›РѕРіРёРєР° РїСЂРѕРєР»СЏС‚РёР№
+        const mandatory = [1,2,3];
+        const hasMandatory = mandatory.every(id => owned.includes(id));
+        const CURSE_CHANCE = 1 / 3;
+        if (hasMandatory && cursesCount < 3 && Math.random() < CURSE_CHANCE) {
+          const expiry = new Date(Date.now() + 60 * 60 * 1000);
+          console.log('[runBurnLogic] issuing curse');
           await client.query(
             `UPDATE players
-                SET fragments = array_append(
-                                  coalesce(fragments,'{}'::int[]),
-                                  $2::int
-                                ),
-                    last_burn  = NOW()
+                SET curses_count = curses_count + 1,
+                    is_cursed    = TRUE,
+                    curse_expires= $2,
+                    last_burn    = NOW()
               WHERE tg_id = $1`,
-            [inv.tg_id, pick]
+            [inv.tg_id, expiry]
           );
-        } else {
-          // РµСЃР»Рё РІСЃС‘ СЃРѕР±СЂР°РЅРѕ, РїСЂРѕСЃС‚Рѕ РѕР±РЅРѕРІР»СЏРµРј РІСЂРµРјСЏ
           await client.query(
-            `UPDATE players SET last_burn = NOW() WHERE tg_id = $1`,
-            [inv.tg_id]
+            `UPDATE burn_invoices
+                SET processed = TRUE
+              WHERE invoice_id = $1`,
+            [invoiceId]
           );
+          await client.query('COMMIT');
+          console.log('[runBurnLogic] curse committed');
+          return { newFragment: null, category: 'curse', pity_counter: currentPity };
         }
     
-        // 4) РїРѕРјРµС‡Р°РµРј РёРЅРІРѕР№СЃ РєР°Рє РѕР±СЂР°Р±РѕС‚Р°РЅРЅС‹Р№
+        // 4) Р’С‹С‡РёСЃР»СЏРµРј РґРёРЅР°РјРёС‡РµСЃРєРёРµ С€Р°РЅСЃС‹
+        const boost = Math.min(currentPity * PITY_BOOST_PER, PITY_CAP);
+        const baseR = CATEGORIES.rare.baseChance;
+        const baseL = CATEGORIES.legendary.baseChance;
+        const totalRL = baseR + baseL + boost;
+        const totalU = CATEGORIES.uncommon.baseChance;
+        const r = Math.random() * 100;
+        let category;
+        if (r < baseL) {
+          category = 'legendary';
+        } else if (r < baseL + baseR) {
+          category = 'rare';
+        } else if (r < totalRL) {
+          const extra = r - (baseL + baseR);
+          const legShare = baseL / (baseL + baseR);
+          category = extra < boost * legShare ? 'legendary' : 'rare';
+        } else if (r < totalRL + totalU) {
+          category = 'uncommon';
+        } else {
+          category = 'common';
+        }
+        console.log('[runBurnLogic] roll result:', { r, category, boost });
+    
+        // 5) Р’С‹Р±РёСЂР°РµРј РєРѕРЅРєСЂРµС‚РЅС‹Р№ С„СЂР°РіРјРµРЅС‚ РёР· РєР°С‚РµРіРѕСЂРёРё
+        const ids = CATEGORIES[category].ids.filter(id => !owned.includes(id));
+        const pick = ids.length
+          ? ids[crypto.randomInt(ids.length)]
+          : null;
+        console.log('[runBurnLogic] selected pick:', pick);
+    
+        // 6) РћР±РЅРѕРІР»СЏРµРј pity_counter and fragments
+        const newPity = (category === 'rare' || category === 'legendary') ? 0 : currentPity + 1;
+        await client.query(
+          `UPDATE players
+              SET fragments    = array_append(coalesce(fragments,'{}'::int[]), $2),
+                  last_burn     = NOW(),
+                  pity_counter  = $3
+            WHERE tg_id = $1`,
+          [inv.tg_id, pick, newPity]
+        );
+    
+        // 7) РћС‚РјРµС‡Р°РµРј РёРЅРІРѕР№СЃ РєР°Рє РѕР±СЂР°Р±РѕС‚Р°РЅРЅС‹Р№
         await client.query(
           `UPDATE burn_invoices
               SET processed = TRUE
             WHERE invoice_id = $1`,
           [invoiceId]
         );
-    
         await client.query('COMMIT');
-        console.log('[runBurnLogic] committed, pick=', pick);
-        return { newFragment: pick, cursed: false, curse_expires: null };
+        console.log('[runBurnLogic] committed successfully');
     
+        return { newFragment: pick, category, pity_counter: newPity };
       } catch (err) {
         await client.query('ROLLBACK');
-        console.error('[runBurnLogic] error, rolled back', err);
+        console.error('[runBurnLogic] error:', err);
         throw err;
       } finally {
         client.release();
       }
     }
-    
     // вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”
-    // 2) РџСѓР±Р»РёС‡РЅС‹Рµ РјР°СЂС€СЂСѓС‚С‹ (РґРѕ authenticate)
+    // 1) РџСѓР±Р»РёС‡РЅС‹Рµ РјР°СЂС€СЂСѓС‚С‹ (РґРѕ authenticate)
     // вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”вЂ”
     
-    /**
-     * POST /api/init
-     */
+    /** POST /api/init */
     router.post('/init', async (req, res) => {
       console.log('[POST /api/init] body:', req.body);
-      const { tg_id, name='', initData='', referrer_code=null } = req.body;
+      const { tg_id, name = '', initData = '', referrer_code = null } = req.body;
       if (!tg_id || !initData) {
         return res.status(400).json({ error: 'tg_id and initData required' });
       }
-    
       try {
-        // РїСЂРѕРІРµСЂРёРј, РµСЃС‚СЊ Р»Рё РёРіСЂРѕРє
         const { rows } = await pool.query(
-          `SELECT 1 FROM players WHERE tg_id=$1`,
+          `SELECT 1 FROM players WHERE tg_id = $1`,
           [tg_id]
         );
         let player;
-    
         if (!rows.length) {
-          // РЅРѕРІС‹Р№ РёРіСЂРѕРє
           const client = await pool.connect();
           try {
             await client.query('BEGIN');
             const code = await genUniqueCode();
-    
-            const { rows:[me] } = await client.query(
+            const { rows: [me] } = await client.query(
               `INSERT INTO players
-                 (tg_id,name,ref_code,referral_reward_issued)
-               VALUES($1,$2,$3,FALSE)
+                 (tg_id, name, ref_code, referral_reward_issued)
+               VALUES($1, $2, $3, FALSE)
                RETURNING *`,
-              [tg_id, name.trim()||null, code]
+              [tg_id, name.trim() || null, code]
             );
             player = me;
-    
-            // РµСЃР»Рё Р±С‹Р» СЂРµС„-РєРѕРґ вЂ” Р·Р°РїРёС€РµРј referral
             if (referrer_code) {
-              const { rows:[ref] } = await client.query(
-                `SELECT tg_id FROM players WHERE ref_code=$1 LIMIT 1`,
+              const { rows: [ref] } = await client.query(
+                `SELECT tg_id FROM players WHERE ref_code = $1 LIMIT 1`,
                 [referrer_code.trim()]
               );
               if (ref) {
                 await client.query(
                   `INSERT INTO referrals
-                     (referrer_id,referred_id,status)
-                   VALUES($1,$2,'confirmed')`,
+                     (referrer_id, referred_id, status)
+                   VALUES($1, $2, 'confirmed')`,
                   [ref.tg_id, tg_id]
                 );
               }
             }
-    
-            // РѕР±РЅРѕРІРёРј СЃС‡С‘С‚С‡РёРє СЋР·РµСЂРѕРІ
             await client.query(
-              `UPDATE global_stats SET value=value+1 WHERE id='total_users'`
+              `UPDATE global_stats SET value = value + 1 WHERE id = 'total_users'`
             );
-    
             await client.query('COMMIT');
           } catch (e) {
             await client.query('ROLLBACK');
-            console.error('[POST /api/init] transaction error', e);
+            console.error('[POST /api/init] TX error:', e);
             throw e;
           } finally {
             client.release();
           }
         } else {
-          // СѓР¶Рµ РµСЃС‚СЊ вЂ” РїСЂРѕСЃС‚Рѕ С‡РёС‚Р°РµРј
-          const { rows:[me] } = await pool.query(
-            `SELECT * FROM players WHERE tg_id=$1`,
+          const { rows: [me] } = await pool.query(
+            `SELECT * FROM players WHERE tg_id = $1`,
             [tg_id]
           );
           player = me;
         }
-    
-        // РІРѕР·РІСЂР°С‰Р°РµРј player + JWT
         const token = sign(player);
         return res.json({ user: player, token });
-    
       } catch (err) {
-        console.error('[POST /api/init] error', err);
+        console.error('[POST /api/init] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
-    /**
-     * GET /api/player/:tg_id
-     */
+    /** GET /api/player/:tg_id */
     router.get('/player/:tg_id', async (req, res) => {
       console.log('[GET /api/player]', req.params.tg_id);
       try {
         const { rows } = await pool.query(
-          `SELECT tg_id,name,fragments,last_burn FROM players WHERE tg_id=$1`,
+          `SELECT tg_id, name, fragments, last_burn, curses_count, pity_counter
+             FROM players
+            WHERE tg_id = $1`,
           [req.params.tg_id]
         );
         if (!rows.length) {
@@ -1811,118 +1873,87 @@
         }
         return res.json(rows[0]);
       } catch (err) {
-        console.error('[GET /api/player] error', err);
+        console.error('[GET /api/player] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
-    // в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-    // 3) Р’СЃРµ РґР°Р»СЊРЅРµР№С€РёРµ РјР°СЂС€СЂСѓС‚С‹ С‚СЂРµР±СѓСЋС‚ JWT
+    // Р’СЃРµ РїРѕСЃР»РµРґСѓСЋС‰РёРµ РјР°СЂС€СЂСѓС‚С‹ С‚СЂРµР±СѓСЋС‚ JWT
     router.use(authenticate);
-    // в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     
-    /**
-     * GET /api/fragments/:tg_id
-     */
+    /** GET /api/fragments/:tg_id */
     router.get('/fragments/:tg_id', async (req, res) => {
       console.log('[GET /api/fragments]', req.params.tg_id);
       try {
-        const { rows:[p] } = await pool.query(
-          `SELECT fragments FROM players WHERE tg_id=$1`,
+        const { rows: [p] } = await pool.query(
+          `SELECT fragments FROM players WHERE tg_id = $1`,
           [req.params.tg_id]
         );
-        if (!p) {
-          return res.status(404).json({ error: 'player not found' });
-        }
-        return res.json({ fragments: p.fragments||[] });
+        if (!p) return res.status(404).json({ error: 'player not found' });
+        return res.json({ fragments: p.fragments || [] });
       } catch (err) {
-        console.error('[GET /api/fragments] error', err);
+        console.error('[GET /api/fragments] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
-    /**
-     * POST /api/burn-invoice
-     */
+    /** POST /api/burn-invoice */
     router.post('/burn-invoice', async (req, res) => {
       console.log('[POST /api/burn-invoice]', req.body);
       const { tg_id } = req.body;
-      if (!tg_id) {
-        return res.status(400).json({ error: 'tg_id required' });
-      }
+      if (!tg_id) return res.status(400).json({ error: 'tg_id required' });
       try {
         const invoiceId = uuid();
-        const comment   = crypto.randomBytes(4).toString('hex');
+        const comment = crypto.randomBytes(4).toString('hex');
         await pool.query(
           `INSERT INTO burn_invoices
-             (invoice_id,tg_id,amount_nano,address,comment,status,created_at)
+             (invoice_id, tg_id, amount_nano, address, comment, status, created_at)
            VALUES($1,$2,$3,$4,$5,'pending',NOW())`,
           [invoiceId, tg_id, AMOUNT_NANO, TON_ADDR, comment]
         );
-        return res.json({
+        res.json({
           invoiceId,
           paymentUrl:  `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
           tonspaceUrl: `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`
         });
       } catch (err) {
-        console.error('[POST /api/burn-invoice] error', err);
+        console.error('[POST /api/burn-invoice] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
-    /**
-     * GET /api/burn-status/:invoiceId
-     */
+    /** GET /api/burn-status/:invoiceId */
     router.get('/burn-status/:invoiceId', async (req, res) => {
-      // Р·Р°РїСЂРµС‚РёРј РєРµС€РёСЂРѕРІР°РЅРёРµ
       res.set('Cache-Control','no-store');
       console.log('[GET /api/burn-status]', req.params.invoiceId);
       try {
-        const { rows:[inv] } = await pool.query(
-          `SELECT status FROM burn_invoices WHERE invoice_id=$1`,
+        const { rows: [inv] } = await pool.query(
+          `SELECT status FROM burn_invoices WHERE invoice_id = $1`,
           [req.params.invoiceId]
         );
-        if (!inv) {
-          return res.status(404).json({ error: 'invoice not found' });
-        }
-        if (inv.status !== 'paid') {
-          console.log('[GET /api/burn-status] still pending');
-          return res.json({ paid: false });
-        }
+        if (!inv) return res.status(404).json({ error: 'invoice not found' });
+        if (inv.status !== 'paid') return res.json({ paid: false });
         const result = await runBurnLogic(req.params.invoiceId);
-        console.log('[GET /api/burn-status] burnLogic:', result);
         return res.json({ paid: true, ...result });
       } catch (err) {
-        console.error('[GET /api/burn-status] ERROR', err);
+        console.error('[GET /api/burn-status] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
-    /**
-     * GET /api/referral
-     */
+    /** GET /api/referral */
     router.get('/referral', async (req, res) => {
       console.log('[GET /api/referral] user:', req.user.tg_id);
       try {
-        // С‡РёС‚Р°РµРј РєРѕРґ Рё СЃС‚Р°С‚СѓСЃ РІС‹РґР°С‡Рё
-        const { rows:[p] } = await pool.query(
-          `SELECT ref_code, referral_reward_issued
-             FROM players
-            WHERE tg_id=$1`,
+        const { rows: [p] } = await pool.query(
+          `SELECT ref_code, referral_reward_issued FROM players WHERE tg_id = $1`,
           [req.user.tg_id]
         );
-        if (!p) {
-          return res.status(404).json({ error: 'player not found' });
-        }
-        // СЃС‡РёС‚Р°РµРј РїСЂРёРіР»Р°С€С‘РЅРЅС‹С…
-        const { rows:[c] } = await pool.query(
-          `SELECT COUNT(*) AS cnt
-             FROM referrals
-            WHERE referrer_id=$1
-              AND status='confirmed'`,
+        if (!p) return res.status(404).json({ error: 'player not found' });
+        const { rows: [c] } = await pool.query(
+          `SELECT COUNT(*) AS cnt FROM referrals WHERE referrer_id = $1 AND status = 'confirmed'`,
           [req.user.tg_id]
         );
-        // РѕР±РЅРѕРІРёРј С‚РѕРєРµРЅ (РѕР±РЅРѕРІР»С‘РЅРЅС‹Р№ JWT)
         res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
         return res.json({
           refCode: p.ref_code,
@@ -1930,275 +1961,450 @@
           rewardIssued: p.referral_reward_issued
         });
       } catch (err) {
-        console.error('[GET /api/referral] ERROR', err);
+        console.error('[GET /api/referral] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
-    /**
-     * POST /api/referral/claim
-     */
+    /** POST /api/referral/claim */
     router.post('/referral/claim', async (req, res) => {
       console.log('[POST /api/referral/claim] user:', req.user.tg_id);
       try {
-        // Р±РµСЂС‘Рј С‚РµРєСѓС‰РёРµ РґР°РЅРЅС‹Рµ
         const { rows } = await pool.query(
-          `SELECT fragments, referral_reward_issued
-             FROM players
-            WHERE tg_id=$1`,
+          `SELECT fragments, referral_reward_issued FROM players WHERE tg_id = $1`,
           [req.user.tg_id]
         );
-        if (!rows.length) {
-          return res.status(404).json({ error: 'player not found' });
-        }
+        if (!rows.length) return res.status(404).json({ error: 'player not found' });
         const p = rows[0];
-        if (p.referral_reward_issued) {
-          return res.status(400).json({ error: 'Reward already claimed' });
-        }
-        // СЃС‡РёС‚Р°РµРј РїСЂРёРіР»Р°С€С‘РЅРЅС‹С…
-        const { rows:[c] } = await pool.query(
-          `SELECT COUNT(*) AS cnt
-             FROM referrals
-            WHERE referrer_id=$1
-              AND status='confirmed'`,
+        if (p.referral_reward_issued) return res.status(400).json({ error: 'Reward already claimed' });
+        const { rows: [c] } = await pool.query(
+          `SELECT COUNT(*) AS cnt FROM referrals WHERE referrer_id = $1 AND status = 'confirmed'`,
           [req.user.tg_id]
         );
-        if (Number(c.cnt) < 3) {
-          return res.status(400).json({ error: 'Not enough invited users' });
-        }
-        // РІС‹Р±РёСЂР°РµРј СЃР»СѓС‡Р°Р№РЅС‹Р№ РЅРµР·Р°РЅСЏС‚С‹Р№ С„СЂР°РіРјРµРЅС‚
-        const owned     = p.fragments || [];
-        const available = FRAGS.filter(f => !owned.includes(f));
-        const pick      = available.length
+        if (Number(c.cnt) < 3) return res.status(400).json({ error: 'Not enough invited users' });
+        const owned = p.fragments || [];
+        const available = FRAGS.filter(id => !owned.includes(id));
+        const pick = available.length
           ? available[crypto.randomInt(available.length)]
           : null;
-    
-        // Р°РїРґРµР№С‚РёРј РјР°СЃСЃРёРІ
         await pool.query(
           `UPDATE players
-             SET fragments = array_append(
-                               coalesce(fragments,'{}'::int[]),
-                               $2::int
-                             ),
-                 referral_reward_issued = TRUE
-           WHERE tg_id = $1`,
+              SET fragments = array_append(coalesce(fragments,'{}'::int[]), $2),
+                  referral_reward_issued = TRUE
+            WHERE tg_id = $1`,
           [req.user.tg_id, pick]
         );
-    
-        // РѕР±РЅРѕРІР»СЏРµРј JWT РІ Р·Р°РіРѕР»РѕРІРєРµ
         res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
         return res.json({ ok: true, fragment: pick });
-    
       } catch (err) {
-        console.error('[POST /api/referral/claim] ERROR', err);
+        console.error('[POST /api/referral/claim] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       }
     });
     
     /**
-     * DELETE /api/player/:tg_id
+     * GET /api/leaderboard
+     * Р’РѕР·РІСЂР°С‰Р°РµС‚ РјР°СЃСЃРёРІ РёР· 10 Р»СѓС‡С€РёС… РёРіСЂРѕРєРѕРІ:
+     * [{ tg_id, name, avatar_url, total_burns, total_ton }]
      */
+    router.get('/leaderboard', authenticate, async (req, res) => {
+      try {
+        const { rows } = await pool.query(`
+          SELECT p.tg_id, p.name,
+                 COUNT(b.invoice_id)      AS total_burns,
+                 SUM(b.amount_nano)::bigint AS total_ton_nano
+            FROM players p
+            JOIN burn_invoices b ON b.tg_id = p.tg_id
+           WHERE b.status = 'paid'
+           GROUP BY p.tg_id, p.name
+           ORDER BY total_ton_nano DESC
+           LIMIT 10
+        `);
+        // РїСЂРµРѕР±СЂР°Р·СѓРµРј nano в†’ TON
+        const result = rows.map(r => ({
+          tg_id: r.tg_id,
+          name: r.name,
+          totalBurns: Number(r.total_burns),
+          totalTon:   Number(r.total_ton_nano) / 1e9,
+        }));
+        res.json(result);
+      } catch (err) {
+        console.error('[GET /api/leaderboard] ERROR:', err);
+        res.status(500).json({ error: 'internal' });
+      }
+    });
+    
+    /** DELETE /api/player/:tg_id */
     router.delete('/player/:tg_id', async (req, res) => {
-      console.log('[DELETE /api/player] user:', req.user.tg_id,
-                  'target:', req.params.tg_id);
+      console.log('[DELETE /api/player] user:', req.user.tg_id, 'target:', req.params.tg_id);
       if (String(req.user.tg_id) !== req.params.tg_id) {
         return res.status(403).json({ error: 'Forbidden' });
       }
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-    
-        // СѓРґР°Р»СЏРµРј РІСЃРµ referrals
-        await client.query(
-          `DELETE FROM referrals
-            WHERE referrer_id=$1 OR referred_id=$1`,
-          [req.user.tg_id]
-        );
-    
-        // СѓРґР°Р»СЏРµРј РёРЅРІРѕР№СЃС‹
-        await client.query(
-          `DELETE FROM burn_invoices
-            WHERE tg_id=$1`,
-          [req.user.tg_id]
-        );
-    
-        // СѓРґР°Р»СЏРµРј РёРіСЂРѕРєР°
-        await client.query(
-          `DELETE FROM players
-            WHERE tg_id=$1`,
-          [req.user.tg_id]
-        );
-    
+        await client.query(`DELETE FROM referrals WHERE referrer_id = $1 OR referred_id = $1`, [req.user.tg_id]);
+        await client.query(`DELETE FROM burn_invoices WHERE tg_id = $1`, [req.user.tg_id]);
+        await client.query(`DELETE FROM players WHERE tg_id = $1`, [req.user.tg_id]);
         await client.query('COMMIT');
         return res.json({ ok: true });
-    
       } catch (err) {
         await client.query('ROLLBACK');
-        console.error('[DELETE /api/player] ERROR, rolled back', err);
+        console.error('[DELETE /api/player] ERROR:', err);
         return res.status(500).json({ error: 'internal' });
       } finally {
         client.release();
       }
     });
     
+    /**
+     * GET /api/stats/:tg_id
+     * Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃС‚Р°С‚РёСЃС‚РёРєСѓ РїРѕ РєРѕРЅРєСЂРµС‚РЅРѕРјСѓ РёРіСЂРѕРєСѓ:
+     * - totalBurns: С‡РёСЃР»Рѕ СЃР¶РёРіР°РµРјС‹С… РёРЅРІРѕР№СЃРѕРІ СЃРѕ СЃС‚Р°С‚СѓСЃРѕРј paid
+     * - totalTon:   СЃСѓРјРјР° РїРѕС‚СЂР°С‡РµРЅРЅС‹С… TON (РІ РЅР°С‚СѓСЂР°Р»СЊРЅС‹С… РµРґРёРЅРёС†Р°С…)
+     */
+    router.get('/stats/:tg_id', authenticate, async (req, res) => {
+      console.log('[GET /api/stats] user:', req.params.tg_id);
+      try {
+        const { rows: [stats] } = await pool.query(
+          `SELECT
+             COUNT(b.invoice_id)          AS total_burns,
+             COALESCE(SUM(b.amount_nano), 0) AS total_ton_nano
+           FROM burn_invoices b
+          WHERE b.tg_id = $1
+            AND b.status = 'paid'`,
+          [req.params.tg_id]
+        );
+        return res.json({
+          totalBurns: Number(stats.total_burns),
+          totalTon:   Number(stats.total_ton_nano) / 1e9
+        });
+      } catch (err) {
+        console.error('[GET /api/stats] ERROR:', err);
+        return res.status(500).json({ error: 'internal' });
+      }
+    });
+    
+    /**
+     * GET /api/daily-quest
+     * Р’РѕР·РІСЂР°С‰Р°РµС‚, РґРѕСЃС‚СѓРїРµРЅ Р»Рё РµР¶РµРґРЅРµРІРЅС‹Р№ РєРІРµСЃС‚ Рё С‚РµРєСѓС‰РёР№ РєСѓРїРѕРЅ (%).
+     */
+    router.get('/daily-quest', authenticate, async (req, res) => {
+      console.log('[GET /api/daily-quest] user:', req.user.tg_id);
+      try {
+        const { rows: [p] } = await pool.query(
+          `SELECT last_daily_claim, daily_coupon_percent
+             FROM players
+            WHERE tg_id = $1`,
+          [req.user.tg_id]
+        );
+        if (!p) {
+          return res.status(404).json({ error: 'player not found' });
+        }
+        const today = new Date().toISOString().split('T')[0];
+        const canClaim = p.last_daily_claim !== today;
+        return res.json({
+          canClaim,
+          coupon: p.daily_coupon_percent
+        });
+      } catch (err) {
+        console.error('[GET /api/daily-quest] ERROR:', err);
+        return res.status(500).json({ error: 'internal' });
+      }
+    });
+    
+    /**
+     * POST /api/daily-quest/claim
+     * Р•СЃР»Рё РµС‰С‘ РЅРµ Р·Р°СЏРІР»СЏР» СЃРµРіРѕРґРЅСЏ вЂ” РІС‹РґР°С‘С‚ РєСѓРїРѕРЅ Рё РѕР±РЅРѕРІР»СЏРµС‚ РґР°С‚Сѓ.
+     */
+    router.post('/daily-quest/claim', authenticate, async (req, res) => {
+      console.log('[POST /api/daily-quest/claim] user:', req.user.tg_id);
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const { rows: [p] } = await pool.query(
+          `SELECT last_daily_claim FROM players WHERE tg_id = $1`,
+          [req.user.tg_id]
+        );
+        if (!p) {
+          return res.status(404).json({ error: 'player not found' });
+        }
+        if (p.last_daily_claim === today) {
+          return res.status(400).json({ error: 'Already claimed today' });
+        }
+        const couponPercent = 30; // С„РёРєСЃРёСЂРѕРІР°РЅРЅР°СЏ СЃРєРёРґРєР°
+        await pool.query(
+          `UPDATE players
+              SET last_daily_claim      = $2,
+                  daily_coupon_percent = $3
+            WHERE tg_id = $1`,
+          [req.user.tg_id, today, couponPercent]
+        );
+        return res.json({ coupon: couponPercent });
+      } catch (err) {
+        console.error('[POST /api/daily-quest/claim] ERROR:', err);
+        return res.status(500).json({ error: 'internal' });
+      }
+    });
+    
     export default router;
 
 ===== FILE: routes\validate.js =====
-    // routes/validate.js вЂ“ РїСЂРѕРІРµСЂРєР° РїРѕРґРїРёСЃРё Telegram initData
+    // С„Р°Р№Р»: src/routes/validate.js
     import express from 'express';
     import crypto  from 'crypto';
-    import dotenv  from 'dotenv';
-    
-    dotenv.config();
+    import process from 'process';
+    import jwt     from 'jsonwebtoken';
+    import pool    from '../db.js';
     
     const router    = express.Router();
-    const BOT_TOKEN = process.env.BOT_TOKEN;          // Р·Р°РґР°С‘С‚СЃСЏ РІ .env
+    const BOT_TOKEN = process.env.BOT_TOKEN;
+    const JWT_SECRET = process.env.JWT_SECRET;
     
-    router.post('/', (req, res) => {
+    // РџСЂРѕРІРµСЂСЏРµРј РѕР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РїРµСЂРµРјРµРЅРЅС‹Рµ РѕРєСЂСѓР¶РµРЅРёСЏ
+    if (!BOT_TOKEN) {
+      console.error('вќЊ BOT_TOKEN РЅРµ Р·Р°РґР°РЅ');
+      process.exit(1);
+    }
+    if (!JWT_SECRET) {
+      console.error('вќЊ JWT_SECRET РЅРµ Р·Р°РґР°РЅ');
+      process.exit(1);
+    }
+    
+    // Р“РµРЅРµСЂР°С†РёСЏ СЃР»СѓС‡Р°Р№РЅРѕРіРѕ СЂРµС„-РєРѕРґР°
+    function randRef() {
+      return crypto.randomBytes(6).toString('base64url');
+    }
+    
+    // Р“РµРЅРµСЂР°С†РёСЏ СѓРЅРёРєР°Р»СЊРЅРѕРіРѕ СЂРµС„-РєРѕРґР°, РїСЂРѕРІРµСЂРєР° РІ Р‘Р”
+    async function genUniqueCode() {
+      for (let i = 0; i < 8; i++) {
+        const code = randRef();
+        const { rows } = await pool.query(
+          `SELECT 1 FROM players WHERE ref_code = $1 LIMIT 1`,
+          [code]
+        );
+        if (!rows.length) return code;
+      }
+      return randRef();
+    }
+    
+    /**
+     * POST /api/validate
+     * РџСЂРѕРІРµСЂРєР° РїРѕРґРїРёСЃРё Telegram initData, СЃРѕР·РґР°РЅРёРµ/РѕР±РЅРѕРІР»РµРЅРёРµ РїСЂРѕС„РёР»СЏ Рё РІС‹РґР°С‡Р° JWT
+     */
+    router.post('/', async (req, res) => {
       const { initData } = req.body;
     
-      if (!initData || !BOT_TOKEN) {
-        console.warn('[VALIDATE] вќЊ Missing initData or BOT_TOKEN');
-        return res.status(400).json({ ok: false, error: 'Missing initData or token' });
+      if (!initData) {
+        console.warn('[VALIDATE] вќЊ РџСѓСЃС‚РѕР№ initData');
+        return res.status(400).json({ ok: false, error: 'initData is required' });
       }
     
       try {
-        /* в”Ђв”Ђ СЂР°СЃРєР»Р°РґС‹РІР°РµРј initData в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
-        const parsed = new URLSearchParams(initData);
-        const hash   = parsed.get('hash');
-        parsed.delete('hash');               // СЃРёРіРЅР°С‚СѓСЂР° РЅРµ СѓС‡Р°СЃС‚РІСѓРµС‚ РІ РІС‹С‡РёСЃР»РµРЅРёРё
+        // Р Р°Р·Р±РёСЂР°РµРј initData С„РѕСЂРјР°С‚Р° "key1=value1&key2=value2..."
+        const params = new URLSearchParams(initData);
+        const hash   = params.get('hash');
+        params.delete('hash');
     
-        const dataCheckString = [...parsed.entries()]
-          .map(([k, v]) => `${k}=${v}`)
+        if (!hash) {
+          console.warn('[VALIDATE] вќЊ РћС‚СЃСѓС‚СЃС‚РІСѓРµС‚ РїР°СЂР°РјРµС‚СЂ hash');
+          return res.status(400).json({ ok: false, error: 'Missing hash parameter' });
+        }
+    
+        // РЎС‚СЂРѕРєР° РґР»СЏ РїСЂРѕРІРµСЂРєРё РїРѕРґРїРёСЃРё
+        const dataCheckString = [...params.entries()]
+          .map(([key, value]) => `${key}=${value}`)
           .sort()
           .join('\n');
     
-        /* в”Ђв”Ђ Telegram-Р°Р»РіРѕСЂРёС‚Рј в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
+        // РЎРµРєСЂРµС‚ РґР»СЏ HMAC РёР· BOT_TOKEN (С‡Р°СЃС‚СЊ РїРѕСЃР»Рµ ":")
         const secretPart = BOT_TOKEN.includes(':')
-          ? BOT_TOKEN.split(':')[1]          // "...:botHash" в†’ Р±РµСЂС‘Рј РІС‚РѕСЂСѓСЋ С‡Р°СЃС‚СЊ
+          ? BOT_TOKEN.split(':')[1]
           : BOT_TOKEN;
         const secret = crypto.createHash('sha256')
-                              .update(secretPart)
-                              .digest();
-        const hmac   = crypto.createHmac('sha256', secret)
-                             .update(dataCheckString)
-                             .digest('hex');          // hex lower-case
+                             .update(secretPart)
+                             .digest();
     
-        if (hmac !== hash) {
-          console.warn('[VALIDATE] вќЊ Invalid signature');
-          return res.status(403).json({ ok: false, error: 'Invalid signature' });
+        // Р’С‹С‡РёСЃР»СЏРµРј HMAC Рё СЃСЂР°РІРЅРёРІР°РµРј СЃ hash
+        const computedHash = crypto.createHmac('sha256', secret)
+                                   .update(dataCheckString)
+                                   .digest('hex');
+        if (computedHash !== hash) {
+          console.warn('[VALIDATE] вќЊ РќРµРІРµСЂРЅР°СЏ РїРѕРґРїРёСЃСЊ initData');
+          return res.status(403).json({ ok: false, error: 'Invalid initData signature' });
         }
     
-        /* в”Ђв”Ђ СѓСЃРїРµС… в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */
-        const user = JSON.parse(parsed.get('user'));
-        return res.json({ ok: true, user });
+        // РР·РІР»РµРєР°РµРј РґР°РЅРЅС‹Рµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РёР· initData
+        const userJson = params.get('user');
+        if (!userJson) {
+          console.warn('[VALIDATE] вќЊ РћС‚СЃСѓС‚СЃС‚РІСѓСЋС‚ РґР°РЅРЅС‹Рµ user РІ initData');
+          return res.status(400).json({ ok: false, error: 'Missing user data' });
+        }
+        const userInfo = JSON.parse(userJson);
+    
+        // РЎРѕР·РґР°РµРј РёР»Рё РѕР±РЅРѕРІР»СЏРµРј РїСЂРѕС„РёР»СЊ РІ Р‘Р”
+        const tgId  = userInfo.id;
+        const name  = userInfo.first_name || null;
+        let player;
+        const { rows } = await pool.query(
+          `SELECT 1 FROM players WHERE tg_id = $1`,
+          [tgId]
+        );
+        if (!rows.length) {
+          // РќРѕРІС‹Р№ РёРіСЂРѕРє
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            const code = await genUniqueCode();
+            const { rows: [me] } = await client.query(
+              `INSERT INTO players
+                 (tg_id, name, ref_code, referral_reward_issued)
+               VALUES ($1, $2, $3, FALSE)
+               RETURNING *`,
+              [tgId, name, code]
+            );
+            // РћР±РЅРѕРІР»СЏРµРј РіР»РѕР±Р°Р»СЊРЅСѓСЋ СЃС‚Р°С‚РёСЃС‚РёРєСѓ
+            await client.query(
+              `UPDATE global_stats SET value = value + 1 WHERE id = 'total_users'`
+            );
+            await client.query('COMMIT');
+            player = me;
+          } catch (err) {
+            await client.query('ROLLBACK');
+            console.error('[VALIDATE] error creating user', err);
+            throw err;
+          } finally {
+            client.release();
+          }
+        } else {
+          // РЎСѓС‰РµСЃС‚РІСѓСЋС‰РёР№ РёРіСЂРѕРє
+          const { rows: [me] } = await pool.query(
+            `SELECT * FROM players WHERE tg_id = $1`,
+            [tgId]
+          );
+          player = me;
+        }
+    
+        // Р“РµРЅРµСЂРёСЂСѓРµРј JWT РґР»СЏ РєР»РёРµРЅС‚Р°
+        const token = jwt.sign(
+          { tg_id: player.tg_id, name: player.name },
+          JWT_SECRET,
+          { expiresIn: '7d' }
+        );
+    
+        return res.status(200).json({ ok: true, user: player, token });
       } catch (err) {
         console.error('[VALIDATE ERROR]', err);
-        return res.status(500).json({ ok: false, error: 'Internal error' });
+        return res.status(500).json({ ok: false, error: 'Internal server error' });
       }
     });
     
     export default router;
 
 ===== FILE: routes\validateFinal.js =====
-    // routes/validateFinal.js
-    import express          from 'express';
-    import jwt              from 'jsonwebtoken';
-    import pool             from '../db.js';
+    // С„Р°Р№Р»: src/routes/validateFinal.js
+    import express from 'express';
+    import jwt from 'jsonwebtoken';
+    import pool from '../db.js'; // СЃРєРѕСЂСЂРµРєС‚РёСЂРѕРІР°РЅРЅС‹Р№ РёРјРїРѕСЂС‚: РІРІРµСЂС… РёР· РїР°РїРєРё routes
     import { authenticate } from '../middleware/auth.js';
+    import process from 'process';
     
     const router = express.Router();
-    const JWT_SECRET = process.env.JWT_SECRET;
     
-    /** Р“РµРЅРµСЂР°С†РёСЏ РЅРѕРІРѕРіРѕ JWT */
+    // РџСЂРѕРІРµСЂСЏРµРј РѕР±СЏР·Р°С‚РµР»СЊРЅСѓСЋ РїРµСЂРµРјРµРЅРЅСѓСЋ РѕРєСЂСѓР¶РµРЅРёСЏ
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error('вќЊ JWT_SECRET РЅРµ Р·Р°РґР°РЅ');
+      process.exit(1);
+    }
+    
+    /**
+     * Р“РµРЅРµСЂР°С†РёСЏ РЅРѕРІРѕРіРѕ JWT РґР»СЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+     * @param {{tg_id: number, name: string}} user
+     * @returns {string} JWT
+     */
     function generateToken(user) {
       return jwt.sign(
         { tg_id: user.tg_id, name: user.name },
         JWT_SECRET,
-        { expiresIn: '1h' }
+        { expiresIn: '7d' } // С‚РѕРєРµРЅ РґРµР№СЃС‚РІРёС‚РµР»РµРЅ 7 РґРЅРµР№
       );
     }
     
-    // РџСЂРѕРїСѓСЃРєР°РµРј preflight, РїРѕС‚РѕРј вЂ” Р°СѓС‚РµРЅС‚РёС„РёРєР°С†РёСЏ
+    // РћР±СЂР°Р±Р°С‚С‹РІР°РµРј preflight-Р·Р°РїСЂРѕСЃ
     router.options('/', (_req, res) => res.sendStatus(204));
+    // РђСѓС‚РµРЅС‚РёС„РёРєР°С†РёСЏ JWT
     router.use(authenticate);
     
     /**
      * POST /api/validate-final
-     *  1) РѕРєРЅРѕ РІРІРѕРґР° (С‡Р°СЃ+РјРёРЅСѓС‚Р° СЂРµРіРёСЃС‚СЂР°С†РёРё),
-     *  2) РµСЃС‚СЊ 8 С„СЂР°РіРјРµРЅС‚РѕРІ,
-     *  3) СЃС‚СЂРѕРєР° === `${ENV.TEMPLATE}-${nickname}` (Р±РµР· СѓС‡С‘С‚Р° СЂРµРіРёСЃС‚СЂР°).
+     * РџСЂРѕРІРµСЂРєР° С„РёРЅР°Р»СЊРЅРѕР№ С„СЂР°Р·С‹:
+     * - РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РїСЂРѕС€С‘Р» Р°СѓС‚РµРЅС‚РёС„РёРєР°С†РёСЋ JWT
+     * - РїСЂРѕС€Р»Рѕ РЅРµ Р±РѕР»СЊС€Рµ 1 РјРёРЅСѓС‚С‹ СЃ РјРѕРјРµРЅС‚Р° СЂРµРіРёСЃС‚СЂР°С†РёРё
+     * - Сѓ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РµСЃС‚СЊ РІСЃРµ 8 С„СЂР°РіРјРµРЅС‚РѕРІ
+     * - РІРІРµРґС‘РЅРЅР°СЏ С„СЂР°Р·Р° СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓРµС‚ С€Р°Р±Р»РѕРЅСѓ
+     * Р’ С‚РµР»Рµ Р·Р°РїСЂРѕСЃР°: { phrase: string }
      */
     router.post('/', async (req, res) => {
-      const { userId, inputPhrase } = req.body;
-      if (!userId || !inputPhrase) {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'Missing userId or inputPhrase' });
+      const { phrase } = req.body;
+      if (!phrase) {
+        return res.status(400).json({ ok: false, error: 'Missing phrase' });
       }
     
-      // РџСЂРѕРІРµСЂСЏРµРј С‚РѕРєРµРЅ
-      if (String(req.user.tg_id) !== String(userId)) {
-        return res.status(403).json({ ok: false, error: 'Forbidden' });
-      }
+      const tgId = req.user.tg_id;
     
       try {
-        // Р‘РµСЂС‘Рј РёР· Р‘Р”
+        // РР·РІР»РµРєР°РµРј РґР°РЅРЅС‹Рµ РёРіСЂРѕРєР°
         const { rows } = await pool.query(
           `SELECT name, created_at, fragments
              FROM players
             WHERE tg_id = $1
-            LIMIT 1`,
-          [userId]
+            LIMIT 1;`,
+          [tgId]
         );
-        if (!rows.length) {
-          return res.status(404).json({ ok: false, error: 'User not found' });
+        if (rows.length === 0) {
+          return res.status(404).json({ ok: false, error: 'Player not found' });
         }
+    
         const { name, created_at, fragments } = rows[0];
         const created = new Date(created_at);
-        const now     = new Date();
+        const now = new Date();
     
-        // РћРєРЅРѕ: С‚РѕС‚ Р¶Рµ С‡Р°СЃ Рё РјРёРЅСѓС‚Р°
-        const windowOpen =
-             created.getHours()   === now.getHours() &&
-             created.getMinutes() === now.getMinutes();
-    
-        const hasAllFragments =
-          Array.isArray(fragments) && fragments.length === 8;
-    
-        if (!windowOpen || !hasAllFragments) {
+        // РџСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ СЃРµР№С‡Р°СЃ С‚Р° Р¶Рµ РјРёРЅСѓС‚Р°, С‡С‚Рѕ Рё РїСЂРё СЂРµРіРёСЃС‚СЂР°С†РёРё
+        if (
+          created.getUTCFullYear() !== now.getUTCFullYear() ||
+          created.getUTCMonth()    !== now.getUTCMonth()    ||
+          created.getUTCDate()     !== now.getUTCDate()     ||
+          created.getUTCHours()    !== now.getUTCHours()    ||
+          created.getUTCMinutes()  !== now.getUTCMinutes()
+        ) {
           return res.status(400).json({
             ok: false,
-            error:'Time window for final phrase has expired or fragments missing'
+            error: 'Time window for final phrase has expired'
           });
         }
     
-        // РЎРѕСЃС‚Р°РІР»СЏРµРј РѕР¶РёРґР°РµРјСѓСЋ С„СЂР°Р·Сѓ
-        const template = (process.env.FINAL_PHRASE_TEMPLATE||'').trim();
-        const expected = `${template}-${name}`.trim();
-    
-        // Р›РѕРіРё РґР»СЏ РґРµР±Р°РіР°
-        console.log('[VALIDATE-FINAL] received:', JSON.stringify(inputPhrase));
-        console.log('[VALIDATE-FINAL] expected:',  JSON.stringify(expected));
-    
-        // РЎСЂР°РІРЅРёРІР°РµРј case-insensitive
-        if (inputPhrase.trim().toLowerCase() !== expected.toLowerCase()) {
-          console.log('[VALIDATE-FINAL] MISMATCH');
-          return res
-            .status(400)
-            .json({ ok: false, error: 'Incorrect final phrase' });
+        // РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ РІСЃРµС… 8 С„СЂР°РіРјРµРЅС‚РѕРІ
+        if (!Array.isArray(fragments) || fragments.length !== 8) {
+          return res.status(400).json({ ok: false, error: 'Fragments missing' });
         }
     
-        // РЈСЃРїРµС… в†’ РЅРѕРІС‹Р№ С‚РѕРєРµРЅ
+        // Р¤РѕСЂРјРёСЂСѓРµРј РѕР¶РёРґР°РµРјСѓСЋ С„СЂР°Р·Сѓ
+        const template = (process.env.FINAL_PHRASE_TEMPLATE || '').trim();
+        const expected = `${template}-${name}`.trim();
+    
+        if (phrase.trim().toLowerCase() !== expected.toLowerCase()) {
+          return res.status(400).json({ ok: false, error: 'Incorrect final phrase' });
+        }
+    
+        // РЈСЃРїРµС€РЅРѕ вЂ” РІС‹РґР°С‘Рј РЅРѕРІС‹Р№ JWT
         const newToken = generateToken(req.user);
         res.setHeader('Authorization', `Bearer ${newToken}`);
         return res.json({ ok: true });
     
       } catch (err) {
         console.error('[VALIDATE-FINAL ERROR]', err);
-        return res
-          .status(500)
-          .json({ ok: false, error: 'Internal server error' });
+        return res.status(500).json({ ok: false, error: 'Internal server error' });
       }
     });
     
