@@ -166,23 +166,70 @@ router.post('/burn-invoice',async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'internal'});}  
 });
 
-// 5) check burn status
-router.get('/burn-status/:invoiceId',async(req,res)=>{
-  try{
-    const {rows:[inv]}=await pool.query(`SELECT status,quest_status,quest_data FROM burn_invoices WHERE invoice_id=$1`,[req.params.invoiceId]);
-    if(!inv) return res.status(404).json({error:'not found'});
-    // not paid
-    if(inv.status!=='paid') return res.json({paid:false,task:inv.quest_data});
-    // pending quest
-    if(inv.quest_status==='pending') return res.json({paid:true,task:inv.quest_data});
-    // in progress
-    if(inv.quest_status==='in_progress') return res.json({paid:true,inQuest:true});
-    // completed
-    return res.json({paid:true,done:true});
-  }catch(e){res.status(500).json({error:'internal'});}  
+// 5) GET /api/burn-status/:invoiceId
+router.get('/burn-status/:invoiceId', async (req, res) => {
+  try {
+    const { rows: [inv] } = await pool.query(
+      `SELECT status, quest_status, quest_data FROM burn_invoices WHERE invoice_id = $1`,
+      [req.params.invoiceId]
+    );
+    if (!inv) return res.status(404).json({ error: 'not found' });
+
+    // Not yet paid
+    if (inv.status !== 'paid') {
+      return res.json({ paid: false, task: inv.quest_data });
+    }
+
+    // Paid but quest not started
+    if (inv.quest_status === 'pending') {
+      // Mark quest as in progress
+      await pool.query(
+        `UPDATE burn_invoices SET quest_status = 'in_progress' WHERE invoice_id = $1`,
+        [req.params.invoiceId]
+      );
+      return res.json({ paid: true, inQuest: true, task: inv.quest_data });
+    }
+
+    // Paid and quest in progress
+    if (inv.quest_status === 'in_progress') {
+      return res.json({ paid: true, inQuest: true, task: inv.quest_data });
+    }
+
+    // Quest completed
+    return res.json({ paid: true, done: true });
+  } catch (e) {
+    console.error('[GET /api/burn-status] ERROR:', e);
+    return res.status(500).json({ error: 'internal' });
+  }
 });
 
-// 6) complete quest
+// 6) POST /api/burn-complete/:invoiceId
+router.post('/burn-complete/:invoiceId', async (req, res) => {
+  const { success } = req.body;
+  const { invoiceId } = req.params;
+  if (typeof success !== 'boolean') {
+    return res.status(400).json({ error: 'success boolean required' });
+  }
+  try {
+    // Update quest status regardless
+    const newStatus = success ? 'completed' : 'in_progress';
+    await pool.query(
+      `UPDATE burn_invoices SET quest_status = $2 WHERE invoice_id = $1`,
+      [invoiceId, newStatus]
+    );
+
+    if (!success) {
+      // If quest failed, let front-end retry or increment pity
+      return res.json({ success: false });
+    }
+    // Quest succeeded: run burn logic
+    const result = await runBurnLogic(invoiceId);
+    return res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('[POST /api/burn-complete] ERROR:', e);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
 router.post('/burn-complete/:invoiceId',async(req,res)=>{
   const {success} = req.body; const {invoiceId}=req.params;
   if(typeof success!=='boolean') return res.status(400).json({error:'boolean required'});
@@ -194,8 +241,6 @@ router.post('/burn-complete/:invoiceId',async(req,res)=>{
     return res.json({success:true,...result});
   }catch(e){console.error(e);res.status(500).json({error:'internal'});}  
 });
-
-
 // —————————————————————————————————————————————————————————————————————————
 // 6) Referral claim — выдаёт фрагменты #2 и #3 одновременно
 // —————————————————————————————————————————————————————————————————————————
