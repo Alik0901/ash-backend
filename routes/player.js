@@ -332,9 +332,14 @@ router.post('/referral/claim', async (req, res) => {
     // выдаём сразу фрагменты 2 и 3
     await pool.query(
       `UPDATE players
-         SET fragments = array_cat(coalesce(fragments,'{}'::int[]), ARRAY[2,3]),
-             referral_reward_issued = TRUE
-       WHERE tg_id=$1`,
+   SET fragments = (
+         SELECT ARRAY(
+           SELECT DISTINCT x
+           FROM unnest(array_cat(coalesce(players.fragments,'{}'::int[]), ARRAY[2,3])) AS t(x)
+         )
+       ),
+       referral_reward_issued = TRUE
+ WHERE tg_id = $1`,
       [req.user.tg_id]
     );
 
