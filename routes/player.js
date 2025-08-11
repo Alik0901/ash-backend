@@ -45,55 +45,100 @@ async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows:[inv] } = await client.query(
-      `SELECT tg_id, processed FROM burn_invoices WHERE invoice_id=$1 AND status='paid' FOR UPDATE`,
+
+    // 1) invoice lock
+    const { rows: [inv] } = await client.query(
+      `SELECT tg_id, processed
+         FROM burn_invoices
+        WHERE invoice_id=$1 AND status='paid'
+        FOR UPDATE`,
       [invoiceId]
     );
     if (!inv || inv.processed) {
       await client.query('ROLLBACK');
-      return { newFragment:null, cursed:false, pity_counter:null, curse_expires:null };
+      return { newFragment: null, cursed: false, pity_counter: null, curse_expires: null };
     }
-    const { rows:[pl] } = await client.query(
-      `SELECT fragments, curses_count, pity_counter FROM players WHERE tg_id=$1 FOR UPDATE`,
+
+    // 2) player lock
+    const { rows: [pl] } = await client.query(
+      `SELECT fragments, curses_count, pity_counter
+         FROM players
+        WHERE tg_id=$1
+        FOR UPDATE`,
       [inv.tg_id]
     );
-    const owned = pl.fragments||[];
-    let cursesCount = pl.curses_count||0;
-    let pity        = pl.pity_counter||0;
-    // curse?
-    if (cursesCount<MAX_CURSES && Math.random()<CURSE_CHANCE) {
-      cursesCount++;
-      const expiry = new Date(Date.now()+24*3600*1000);
+
+    // Нормализуем owned как массив чисел
+    const owned = Array.isArray(pl?.fragments) ? pl.fragments.map(n => Number(n)) : [];
+    let cursesCount = Number(pl?.curses_count || 0);
+    let pity        = Number(pl?.pity_counter || 0);
+
+    // 3) проклятие
+    if (cursesCount < MAX_CURSES && Math.random() < CURSE_CHANCE) {
+      cursesCount += 1;
+      const expiry = new Date(Date.now() + 24 * 3600 * 1000);
       await client.query(
-        `UPDATE players SET curses_count=$2, is_cursed=TRUE, curse_expires=$3, last_burn=NOW(), pity_counter=$4 WHERE tg_id=$1`,
-        [inv.tg_id, cursesCount, expiry, pity+1]
+        `UPDATE players
+            SET curses_count   = $2,
+                is_cursed      = TRUE,
+                curse_expires  = $3,
+                last_burn      = NOW(),
+                pity_counter   = $4
+          WHERE tg_id=$1`,
+        [inv.tg_id, cursesCount, expiry, pity + 1]
       );
-      await client.query(`UPDATE burn_invoices SET processed=TRUE WHERE invoice_id=$1`,[invoiceId]);
+      await client.query(`UPDATE burn_invoices SET processed=TRUE WHERE invoice_id=$1`, [invoiceId]);
       await client.query('COMMIT');
-      return { newFragment:null, cursed:true, pity_counter:pity+1, curse_expires:expiry.toISOString() };
+      return { newFragment: null, cursed: true, pity_counter: pity + 1, curse_expires: expiry.toISOString() };
     }
-    // fragment
-    const rem = FRAGS.filter(id=>!owned.includes(id));
-    const pick = rem.length? rem[crypto.randomInt(rem.length)]: null;
-    if (pick!==null) {
+
+    // 4) выбор фрагмента только из НЕполученных
+    const remaining = FRAGS.filter(id => !owned.includes(Number(id)));
+    const pick = remaining.length ? remaining[crypto.randomInt(remaining.length)] : null;
+
+    if (pick !== null) {
+      // 5а) добавляем фрагмент только если его реально нет
       await client.query(
-        `UPDATE players SET fragments=array_append(coalesce(fragments,'{}'::int[]),$2), last_burn=NOW(), pity_counter=0, curses_count=$3, is_cursed=FALSE, curse_expires=NULL WHERE tg_id=$1`,
+        `UPDATE players
+            SET fragments =
+                  CASE
+                    WHEN NOT (coalesce(fragments,'{}'::int[]) @> ARRAY[$2]::int[])
+                    THEN array_append(coalesce(fragments,'{}'::int[]), $2)
+                    ELSE fragments
+                  END,
+                last_burn     = NOW(),
+                pity_counter  = 0,
+                curses_count  = $3,
+                is_cursed     = FALSE,
+                curse_expires = NULL
+          WHERE tg_id=$1`,
         [inv.tg_id, pick, cursesCount]
       );
-      pity=0;
+      pity = 0;
     } else {
-      pity++;
+      // 5б) всё собрано — усиливаем pity, ничего не добавляем
+      pity += 1;
       await client.query(
-        `UPDATE players SET last_burn=NOW(), pity_counter=$2, curses_count=$3 WHERE tg_id=$1`,
+        `UPDATE players
+            SET last_burn    = NOW(),
+                pity_counter = $2,
+                curses_count = $3
+          WHERE tg_id=$1`,
         [inv.tg_id, pity, cursesCount]
       );
     }
-    await client.query(`UPDATE burn_invoices SET processed=TRUE WHERE invoice_id=$1`,[invoiceId]);
+
+    // 6) финализация инвойса
+    await client.query(`UPDATE burn_invoices SET processed=TRUE WHERE invoice_id=$1`, [invoiceId]);
     await client.query('COMMIT');
-    return { newFragment:pick, cursed:false, pity_counter:pity, curse_expires:null };
-  } catch(e) {
-    await client.query('ROLLBACK'); throw e;
-  } finally { client.release(); }
+
+    return { newFragment: pick, cursed: false, pity_counter: pity, curse_expires: null };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // 1) init player
