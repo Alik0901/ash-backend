@@ -142,36 +142,71 @@ async function runBurnLogic(invoiceId) {
 }
 
 // 1) init player
-router.post('/init', async (req,res)=>{
-  const {tg_id,name='',initData,referrer_code=null}=req.body;
-  if(!tg_id||!initData) return res.status(400).json({error:'tg_id and initData required'});
-  try{
-    const {rows} = await pool.query(`SELECT 1 FROM players WHERE tg_id=$1`,[tg_id]);
+// —————————————————————————————————————————————————————————————————————————
+// 1) Инициализация игрока — выдаём фрагмент #1 «за старт» + флаг initial_award
+// —————————————————————————————————————————————————————————————————————————
+router.post('/init', async (req, res) => {
+  const { tg_id, name = '', initData, referrer_code = null } = req.body;
+  if (!tg_id || !initData) return res.status(400).json({ error: 'tg_id and initData required' });
+
+  try {
+    const { rows } = await pool.query(`SELECT 1 FROM players WHERE tg_id=$1`, [tg_id]);
     let player;
-    if(!rows.length){
-      const client=await pool.connect();
-      try{
-        await client.query('BEGIN');
-        const code=await genUniqueCode();
-        const {rows:[me]}=await client.query(
-          `INSERT INTO players(tg_id,name,ref_code,referral_reward_issued,fragments)
-            VALUES($1,$2,$3,FALSE,ARRAY[1]) RETURNING *`,[tg_id,name.trim()||null,code]
+    let justCreated = false;
+
+    if (!rows.length) {
+      const client = await pool.connect();
+      await client.query('BEGIN');
+      try {
+        const code = await genUniqueCode();
+        const { rows: [me] } = await client.query(
+          `INSERT INTO players
+             (tg_id, name, ref_code, referral_reward_issued, fragments)
+           VALUES($1,$2,$3,FALSE, ARRAY[1])
+           RETURNING *`,
+          [tg_id, name.trim() || null, code]
         );
-        player=me;
-        if(referrer_code){
-          const {rows:[ref]}=await client.query(`SELECT tg_id FROM players WHERE ref_code=$1 LIMIT 1`,[referrer_code.trim()]);
-          if(ref){await client.query(`INSERT INTO referrals(referrer_id,referred_id,status) VALUES($1,$2,'confirmed')`,[ref.tg_id,tg_id]);}
+        player = me;
+        justCreated = true;
+
+        if (referrer_code) {
+          const { rows: [ref] } = await client.query(
+            `SELECT tg_id FROM players WHERE ref_code=$1 LIMIT 1`,
+            [referrer_code.trim()]
+          );
+          if (ref) {
+            await client.query(
+              `INSERT INTO referrals(referrer_id,referred_id,status)
+               VALUES($1,$2,'confirmed')`, [ref.tg_id, tg_id]
+            );
+          }
         }
         await client.query(`UPDATE global_stats SET value=value+1 WHERE id='total_users'`);
         await client.query('COMMIT');
-      }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
-    }else{
-      const {rows:[me]}=await pool.query(`SELECT * FROM players WHERE tg_id=$1`,[tg_id]); player=me;
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    } else {
+      const { rows: [me] } = await pool.query(`SELECT * FROM players WHERE tg_id=$1`, [tg_id]);
+      player = me;
     }
-    const token=sign(player);
-    res.json({user:player,token});
-  }catch(err){console.error(err);res.status(500).json({error:'internal'});}
+
+    const token = sign(player);
+    // ВАЖНО: вернём флаг initial_award однократно при создании
+    res.json({
+      user: player,
+      token,
+      initial_award: justCreated ? { fragment: 1 } : null
+    });
+  } catch (err) {
+    console.error('[POST /api/init] ERROR:', err);
+    res.status(500).json({ error: 'internal' });
+  }
 });
+
 // 2) fetch player
 router.get('/player/:tg_id',async(req,res)=>{
   try{
