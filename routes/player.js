@@ -11,9 +11,10 @@ const {
   TON_WALLET_ADDRESS: TON_ADDR,
   DEBUG_KEY,
   NODE_ENV,
+  AUTO_PAY_BURN, // ← NEW: авто-оплата инвойса (true/1)
 } = process.env;
 
-// \-\-\-\- Constants ---------------------------------------------------------
+/* ── Constants ───────────────────────────────────────────────────────── */
 const TONHUB_URL = 'https://tonhub.com/transfer';
 const TONSPACE_SCHEME = 'ton://transfer';
 const AMOUNT_NANO = 500_000_000; // 0.5 TON
@@ -22,9 +23,9 @@ const MANDATORY = [1, 2, 3];        // бесплатные/обязательн
 const PAID_POOL  = [4, 5, 6, 7, 8];  // платные фрагменты
 
 const MAX_CURSES   = 2;    // лимит проклятий
-const CURSE_CHANCE = 0.35; // базовый шанс проклятия (дальше можно модифицировать pity)
+const CURSE_CHANCE = 0.35; // базовый шанс проклятия
 
-// \-\-\-\- Helpers -----------------------------------------------------------
+/* ── Helpers ─────────────────────────────────────────────────────────── */
 function sign(user) {
   return jwt.sign({ tg_id: user.tg_id, name: user.name }, JWT_SECRET, { expiresIn: '1h' });
 }
@@ -38,21 +39,22 @@ async function genUniqueCode() {
   return crypto.randomBytes(6).toString('base64url');
 }
 
-// \-\-\-\- Core burn logic ---------------------------------------------------
+/* ── Core burn logic ─────────────────────────────────────────────────── */
 /**
  * runBurnLogic(invoiceId)
- * 1) гарантии: до #1–#3 проклятия не даём; первые ДВА платных сжигания — всегда фрагмент
+ * 1) гарантия: до #1–#3 проклятий нет; первые ДВА платных — всегда фрагмент
  * 2) лимит проклятий: MAX_CURSES
  * 3) выдаём случайный недостающий фрагмент из PAID_POOL
+ * Возвращает: { newFragment, cursed, pity_counter, curse_expires, awarded_rarity? }
  */
 async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) invoice lock
+    // 1) invoice lock (+ берём quest_data, чтобы достать rarity)
     const { rows: [inv] } = await client.query(
-      `SELECT tg_id, processed
+      `SELECT tg_id, processed, quest_data
          FROM burn_invoices
         WHERE invoice_id=$1 AND status='paid'
         FOR UPDATE`,
@@ -83,18 +85,20 @@ async function runBurnLogic(invoiceId) {
     // 3) решить: порча или фрагмент
     let giveCurse = false;
     if (!hasTutorial) {
-      giveCurse = false; // до #1–#3 — никогда не проклинаем
+      giveCurse = false;
     } else if (guaranteeTwo) {
-      giveCurse = false; // первые два платных — гарантированный фрагмент
+      giveCurse = false;
     } else if (canCurseMore) {
-      giveCurse = Math.random() < CURSE_CHANCE; // RNG (можно модифицировать pity)
+      giveCurse = Math.random() < CURSE_CHANCE;
     } else {
-      giveCurse = false; // лимит исчерпан
+      giveCurse = false;
     }
 
     if (giveCurse) {
       cursesCount += 1;
       const expiry = new Date(Date.now() + 24 * 3600 * 1000);
+      const newPity = pity + 1;
+
       await client.query(
         `UPDATE players
            SET curses_count  = $2,
@@ -103,16 +107,36 @@ async function runBurnLogic(invoiceId) {
                last_burn     = NOW(),
                pity_counter  = $4
          WHERE tg_id=$1`,
-        [inv.tg_id, cursesCount, expiry, pity + 1]
+        [inv.tg_id, cursesCount, expiry, newPity]
       );
-      await client.query(`UPDATE burn_invoices SET processed=TRUE WHERE invoice_id=$1`, [invoiceId]);
+
+      const result = {
+        ok: true,
+        newFragment: null,
+        cursed: true,
+        pity_counter: newPity,
+        curse_expires: expiry.toISOString(),
+        awarded_rarity: null,
+      };
+
+      await client.query(
+        `UPDATE burn_invoices
+            SET processed=TRUE,
+                quest_status='success',
+                result_json=$2
+          WHERE invoice_id=$1`,
+        [invoiceId, result]
+      );
+
       await client.query('COMMIT');
-      return { newFragment: null, cursed: true, pity_counter: pity + 1, curse_expires: expiry.toISOString() };
+      return { ...result };
     }
 
     // 4) выдаём фрагмент из PAID_POOL
     const remaining = PAID_POOL.filter(id => !fr.includes(id));
     const pick = remaining.length ? remaining[crypto.randomInt(remaining.length)] : null;
+
+    let awarded_rarity = inv?.quest_data?.rarity ?? null;
 
     if (pick !== null) {
       await client.query(
@@ -125,19 +149,39 @@ async function runBurnLogic(invoiceId) {
          WHERE tg_id=$1`,
         [inv.tg_id, pick]
       );
+
       pity = 0;
     } else {
-      // всё собрано — редкий случай: увеличим pity
+      // всё собрано — редкий кейс
       pity += 1;
       await client.query(
         `UPDATE players SET last_burn = NOW(), pity_counter = $2 WHERE tg_id=$1`,
         [inv.tg_id, pity]
       );
+      awarded_rarity = null;
     }
 
-    await client.query(`UPDATE burn_invoices SET processed=TRUE WHERE invoice_id=$1`, [invoiceId]);
+    const result = {
+      ok: true,
+      newFragment: pick,
+      cursed: false,
+      pity_counter: pity,
+      curse_expires: null,
+      awarded_rarity,
+    };
+
+    await client.query(
+      `UPDATE burn_invoices
+          SET processed=TRUE,
+              quest_status='success',
+              awarded_rarity=$2,
+              result_json=$3
+        WHERE invoice_id=$1`,
+      [invoiceId, awarded_rarity, result]
+    );
+
     await client.query('COMMIT');
-    return { newFragment: pick, cursed: false, pity_counter: pity, curse_expires: null };
+    return { ...result };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -146,7 +190,7 @@ async function runBurnLogic(invoiceId) {
   }
 }
 
-// \-\-\- Routes --------------------------------------------------------------
+/* ── Routes ──────────────────────────────────────────────────────────── */
 // 1) INIT — создаём игрока и дарим фрагмент #1
 router.post('/init', async (req, res) => {
   const { tg_id, name = '', initData, referrer_code = null } = req.body;
@@ -231,6 +275,7 @@ router.get('/fragments/:tg_id', async (req, res) => {
 
 /** 4) POST /api/burn-invoice — создаём счёт + мини-квест
  *   Блокируем, если у игрока нет #1–#3
+ *   Если AUTO_PAY_BURN=true|1 — сразу помечаем paid (временная автооплата)
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
@@ -273,11 +318,22 @@ router.post('/burn-invoice', async (req, res) => {
       [invoiceId, tg_id, AMOUNT_NANO, TON_ADDR, comment, task]
     );
 
+    // Временная авто-оплата (dev/стейдж)
+    const auto = String(AUTO_PAY_BURN || '').toLowerCase();
+    const autoPay = auto === 'true' || auto === '1';
+    if (autoPay) {
+      await pool.query(
+        `UPDATE burn_invoices SET status='paid', paid_at=NOW() WHERE invoice_id=$1`,
+        [invoiceId]
+      );
+    }
+
     return res.json({
       invoiceId,
       paymentUrl:  `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
       tonspaceUrl: `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
       task,
+      paid: autoPay, // фронту можно показать, что оплата уже засчитана
     });
   } catch (err) {
     console.error('[POST /api/burn-invoice] ERROR:', err);
@@ -290,52 +346,109 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const { rows: [inv] } = await pool.query(
-      `SELECT status, quest_data FROM burn_invoices WHERE invoice_id=$1`,
+      `SELECT status, quest_data, processed, result_json
+         FROM burn_invoices
+        WHERE invoice_id=$1`,
       [req.params.invoiceId]
     );
     if (!inv) return res.status(404).json({ error: 'not found' });
+
+    // Если уже обработан, клиенту не надо снова показывать квест
+    if (inv.processed) {
+      return res.json({ paid: true, task: null, processed: true, result: inv.result_json || null });
+    }
+
     if (inv.status !== 'paid') return res.json({ paid: false });
-    return res.json({ paid: true, task: inv.quest_data || null });
+    return res.json({ paid: true, task: inv.quest_data || null, processed: false });
   } catch (err) {
     return res.status(500).json({ error: 'internal' });
   }
 });
 
-// 6) POST /api/burn-complete/:invoiceId — результат мини-квеста
+/**
+ * 6) POST /api/burn-complete/:invoiceId — результат мини-квеста (идемпотентно)
+ *   — При повторных вызовах возвращаем уже сохранённый result_json.
+ *   — На fail: фиксируем pity+1, ставим quest_status='failed', processed=TRUE, result_json.
+ *   — На success: вызываем runBurnLogic (один раз), он сохранит result_json и success.
+ */
 router.post('/burn-complete/:invoiceId', async (req, res) => {
   const { success } = req.body;
   if (typeof success !== 'boolean') {
     return res.status(400).json({ error: 'success boolean required' });
   }
+
+  const client = await pool.connect();
   try {
-    if (!success) {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        const { rows: [inv] } = await client.query(
-          `SELECT tg_id FROM burn_invoices WHERE invoice_id=$1 FOR UPDATE`,
-          [req.params.invoiceId]
-        );
-        if (!inv) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'invoice not found' }); }
-        const { rows: [pl] } = await client.query(
-          `SELECT pity_counter FROM players WHERE tg_id=$1 FOR UPDATE`,
-          [inv.tg_id]
-        );
-        const newPity = Number(pl?.pity_counter || 0) + 1;
-        await client.query(`UPDATE players SET pity_counter=$2 WHERE tg_id=$1`, [inv.tg_id, newPity]);
-        await client.query(`UPDATE burn_invoices SET quest_status='failed' WHERE invoice_id=$1`, [req.params.invoiceId]);
-        await client.query('COMMIT');
-        return res.json({ ok: false, pity_counter: newPity });
-      } catch (e) { await client.query('ROLLBACK'); throw e; }
-      finally { client.release(); }
+    await client.query('BEGIN');
+
+    // Лочим инвойс
+    const { rows: [inv] } = await client.query(
+      `SELECT invoice_id, tg_id, status, processed, quest_status, result_json
+         FROM burn_invoices
+        WHERE invoice_id=$1
+        FOR UPDATE`,
+      [req.params.invoiceId]
+    );
+    if (!inv) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'invoice not found' }); }
+
+    // Если уже есть сохранённый результат — возвращаем его как есть
+    if (inv.result_json) {
+      await client.query('COMMIT');
+      return res.json(inv.result_json);
     }
 
+    // На этом этапе result_json ещё нет. Если статус не paid — это логическая ошибка фронта
+    if (inv.status !== 'paid') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'invoice not paid' });
+    }
+
+    if (!success) {
+      // Идемпотентный fail: pity+1, фиксируем как processed, чтобы нельзя было затем прислать success
+      const { rows: [pl] } = await client.query(
+        `SELECT pity_counter FROM players WHERE tg_id=$1 FOR UPDATE`,
+        [inv.tg_id]
+      );
+      const newPity = Number(pl?.pity_counter || 0) + 1;
+
+      await client.query(`UPDATE players SET pity_counter=$2 WHERE tg_id=$1`, [inv.tg_id, newPity]);
+
+      const result = { ok: false, pity_counter: newPity };
+
+      await client.query(
+        `UPDATE burn_invoices
+            SET quest_status='failed',
+                processed=TRUE,
+                result_json=$2
+          WHERE invoice_id=$1`,
+        [req.params.invoiceId, result]
+      );
+
+      await client.query('COMMIT');
+      return res.json(result);
+    }
+
+    // success === true → запускаем выдачу (один раз)
+    await client.query('COMMIT'); // выходим из транзакции перед вызовом логики (она сама транзакционная)
     const result = await runBurnLogic(req.params.invoiceId);
-    try { await pool.query(`UPDATE burn_invoices SET quest_status='success' WHERE invoice_id=$1`, [req.params.invoiceId]); } catch {}
-    return res.json({ ok: true, ...result });
+
+    // runBurnLogic уже сохранил result_json и success; на всякий случай — синхронизируем статус
+    try {
+      await pool.query(
+        `UPDATE burn_invoices
+            SET quest_status='success'
+          WHERE invoice_id=$1 AND result_json IS NOT NULL`,
+        [req.params.invoiceId]
+      );
+    } catch {}
+
+    return res.json(result);
   } catch (err) {
-    console.error('[POST /api/burn-complete] ERROR:', err);
+    await client.query('ROLLBACK');
+    console.error('[POST /burn-complete] ERROR:', err);
     return res.status(500).json({ error: 'internal' });
+  } finally {
+    client.release();
   }
 });
 
@@ -424,7 +537,7 @@ router.post('/third-claim', async (req, res) => {
   }
 });
 
-// 9) Leaderboard / Delete / Stats / Daily quest (unchanged semantics)
+// 9) Leaderboard / Delete / Stats / Daily quest (без изменений логики)
 router.get('/leaderboard', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(`
