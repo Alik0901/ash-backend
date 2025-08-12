@@ -322,7 +322,6 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
   }
   try {
     if (!success) {
-      // фэйл квеста: pity+1 и всё
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -337,20 +336,22 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
         );
         const newPity = (pl?.pity_counter || 0) + 1;
         await client.query(`UPDATE players SET pity_counter=$2 WHERE tg_id=$1`, [inv.tg_id, newPity]);
+        await client.query(`UPDATE burn_invoices SET quest_status='failed' WHERE invoice_id=$1`, [req.params.invoiceId]);
         await client.query('COMMIT');
-        return res.json({ success: false, pity_counter: newPity });
-      } catch (e) {
-        await client.query('ROLLBACK'); throw e;
-      } finally { client.release(); }
+        return res.json({ ok: false, pity_counter: newPity });
+      } catch (e) { await client.query('ROLLBACK'); throw e; }
+      finally { client.release(); }
     }
-    // success → обычная логика burn
+
     const result = await runBurnLogic(req.params.invoiceId);
-    return res.json({ success: true, ...result });
+    try { await pool.query(`UPDATE burn_invoices SET quest_status='success' WHERE invoice_id=$1`, [req.params.invoiceId]); } catch {}
+    return res.json({ ok: true, ...result });
   } catch (err) {
     console.error('[POST /api/burn-complete] ERROR:', err);
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 // —————————————————————————————————————————————————————————————————————————
 // 7) Рефералка (#2 за 3 инвайта — без изменений)
