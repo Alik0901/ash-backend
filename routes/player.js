@@ -64,10 +64,14 @@ const RUNE_ASSETS = {
 
 /** Riddle bank: key = file name in /public/riddles, answer = number 0..99 */
 const RIDDLE_BANK = [
-  { key: 'riddle_01.png', answer: 7 },
-  { key: 'riddle_02.png', answer: 42 },
-  { key: 'riddle_03.png', answer: 13 },
-  // extend as needed
+  { key: 'riddle_01.png', answer: 1 },
+  { key: 'riddle_02.png', answer: 1 },
+  { key: 'riddle_03.png', answer: 1 },
+  { key: 'riddle_04.png', answer: 1 },
+  { key: 'riddle_05.png', answer: 1 },
+  { key: 'riddle_06.png', answer: 1 },
+  { key: 'riddle_07.png', answer: 1 },
+  { key: 'riddle_08.png', answer: 1 },
 ];
 
 /* ── Small helpers ────────────────────────────────────────────────────── */
