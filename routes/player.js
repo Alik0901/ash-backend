@@ -441,7 +441,10 @@ router.get('/cipher/all', async (_req, res) => {
         urls[id] = signAssetUrl('/runes', name, RUNE_URL_TTL_SEC);
       }
     }
-
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
     return res.json({ byFragment, urls });
   } catch (err) {
     console.error('[GET /api/cipher/all] ERROR:', err);
