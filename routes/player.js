@@ -411,8 +411,11 @@ router.use(authenticate);
  * If ?includeUrls=1, pre-sign and include rune URLs for known runeIds.
  */
 router.get('/cipher/all', async (_req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
   try {
-    const { rows } = await pool.query(
+    const { rows } = await pool.query(  
       `SELECT frag_id, chosen_rune_id, answered_at
          FROM fragment_ciphers
         WHERE tg_id=$1`,
