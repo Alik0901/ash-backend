@@ -1094,6 +1094,34 @@ router.post('/debug/grant-fragments', async (req, res) => {
   }
 });
 
+// POST /api/debug/reset-ciphers  — сбросить выбранные руны у игрока
+router.post('/debug/reset-ciphers', async (req, res) => {
+  try {
+    const key = req.get('X-Debug-Key') || '';
+    if (!process.env.DEBUG_KEY || key !== process.env.DEBUG_KEY) {
+      return res.status(404).json({ error: 'not_found' }); // маскируем в проде
+    }
+    const authTg = req.user?.tg_id;
+    const { tg_id = authTg } = req.body || {};
+    if (!tg_id) return res.status(400).json({ error: 'bad_tg_id' });
+
+    const q = await pool.query(
+      `UPDATE fragment_ciphers
+         SET chosen_num = NULL,
+             chosen_cell = NULL,
+             chosen_rune_id = NULL,
+             answered_at = NULL
+       WHERE tg_id = $1`,
+      [tg_id]
+    );
+    return res.json({ ok: true, reset: q.rowCount });
+  } catch (e) {
+    console.error('[POST /debug/reset-ciphers] ERROR', e);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
+
 /**
  * GET /api/runes/urls?ids=101,202,...
  * Returns signed URLs for requested rune ids.
