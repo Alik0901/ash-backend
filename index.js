@@ -62,6 +62,7 @@ const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const IMAGES_DIR = path.join(PUBLIC_DIR, 'images');
 const FRAGMENTS_DIR = path.join(PUBLIC_DIR, 'fragments');
 
+
 // API
 const PORT = Number(PORT_ENV || 3000);
 const IS_PROD = NODE_ENV === 'production';
@@ -193,38 +194,38 @@ app.use('/api/burn-status', (_req, res, next) => {
   next();
 });
 
-// 6) Signed fragment URL issuer (JWT-protected)
+// 6) Signed final image URL issuer (JWT-protected)
 app.get('/api/fragments/urls', authenticate, (req, res) => {
   try {
-    const TTL_MS = 5 * 60 * 1000; // 5 minutes (millisecond-based for fragments)
+    const TTL_MS = 5 * 60 * 1000; // 5 minutes (ms-based, как раньше)
     const now = Date.now();
+
+    const names = [FINAL_IMAGE];
+    const out = {};
 
     // Dev fallback: when no secret, expose unsigned direct URLs
     if (!FRAG_HMAC_SECRET) {
-      const unsigned = {};
-      for (const name of [...FRAGMENT_FILES, FINAL_IMAGE]) {
-        unsigned[name] = `${req.protocol}://${req.get('host')}/fragments/${encodeURIComponent(
-          name
-        )}`;
+      for (const name of names) {
+        out[name] = `${req.protocol}://${req.get('host')}/fragments/${encodeURIComponent(name)}`;
       }
-      return res.json({ signedUrls: unsigned });
+      return res.json({ signedUrls: out });
     }
 
-    const signedUrls = {};
-    for (const name of [...FRAGMENT_FILES, FINAL_IMAGE]) {
+    for (const name of names) {
       const exp = now + TTL_MS; // ms-based
       const sig = hmacHex(FRAG_HMAC_SECRET, `${name}|${exp}`);
-      signedUrls[name] = `${req.protocol}://${req.get('host')}/fragments/${encodeURIComponent(
+      out[name] = `${req.protocol}://${req.get('host')}/fragments/${encodeURIComponent(
         name
       )}?exp=${exp}&sig=${sig}`;
     }
 
-    return res.json({ signedUrls });
+    return res.json({ signedUrls: out });
   } catch (err) {
     console.error('[GET /api/fragments/urls] ERROR:', err);
     return res.status(500).json({ error: 'internal' });
   }
 });
+
 
 // 7) Game API routes (burn*, referral, third-quest, etc.)
 app.use('/api', playerRoutes);
@@ -232,7 +233,7 @@ app.use('/api', playerRoutes);
 // 8) HMAC-protected fragment delivery (ms-based exp)
 app.get('/fragments/:name', (req, res, next) => {
   const { name } = req.params;
-  if (![...FRAGMENT_FILES, FINAL_IMAGE].includes(name)) return next();
+  if (name !== FINAL_IMAGE) return next();
 
   // Dev fallback: serve unsigned
   if (!FRAG_HMAC_SECRET) {
