@@ -485,6 +485,10 @@ router.get('/cipher/:fragId', async (req, res) => {
     const row = rows[0];
     const url = signAssetUrl('/riddles', row.riddle_key, RIDDLE_URL_TTL_SEC);
 
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     return res.json({
       fragId,
       riddle: { type: 'image', url, ttl: RIDDLE_URL_TTL_SEC },
