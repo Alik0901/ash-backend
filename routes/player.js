@@ -1,3 +1,4 @@
+// routes/player.js
 import express from 'express';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
@@ -6,30 +7,77 @@ import pool from '../db.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
+
 const {
   JWT_SECRET,
   TON_WALLET_ADDRESS: TON_ADDR,
   DEBUG_KEY,
   NODE_ENV,
-  AUTO_PAY_BURN, // ← NEW: авто-оплата инвойса (true/1)
+  AUTO_PAY_BURN,        // dev/stage helper: auto-mark invoice as "paid"
+  FRAG_HMAC_SECRET,     // used to sign riddles/runes asset URLs
 } = process.env;
 
-/* ── Constants ───────────────────────────────────────────────────────── */
+/* ── Constants ────────────────────────────────────────────────────────── */
+
+/** External payment URI schemes */
 const TONHUB_URL = 'https://tonhub.com/transfer';
 const TONSPACE_SCHEME = 'ton://transfer';
-const AMOUNT_NANO = 500_000_000; // 0.5 TON
 
-const MANDATORY = [1, 2, 3];        // бесплатные/обязательные
-const PAID_POOL  = [4, 5, 6, 7, 8];  // платные фрагменты
+/** Default burn amount (0.5 TON = 500_000_000 nano) */
+const AMOUNT_NANO = 500_000_000;
 
-const MAX_CURSES   = 2;    // лимит проклятий
-const CURSE_CHANCE = 0.35; // базовый шанс проклятия
+/** Fragments */
+const MANDATORY = [1, 2, 3];       // free/mandatory ones
+const PAID_POOL  = [4, 5, 6, 7, 8]; // paid fragments
 
-/* ── Helpers ─────────────────────────────────────────────────────────── */
+/** Curses */
+const MAX_CURSES   = 2;     // max curses applied to a player
+const CURSE_CHANCE = 0.35;  // base chance once guarantees are over
+
+/** Signed asset TTLs */
+const RIDDLE_URL_TTL_SEC = 120; // 2 min
+const RUNE_URL_TTL_SEC   = 300; // 5 min
+
+/** Rune pairs per fragment (two choices) */
+const RUNE_PAIRS = {
+  1: [101, 102],
+  2: [201, 202],
+  3: [301, 302],
+  4: [401, 402],
+  5: [501, 502],
+  6: [601, 602],
+  7: [701, 702],
+  8: [801, 802],
+};
+
+/** Rune id -> asset name (in /public/runes) */
+const RUNE_ASSETS = {
+  101: 'rune_1a.png', 102: 'rune_1b.png',
+  201: 'rune_2a.png', 202: 'rune_2b.png',
+  301: 'rune_3a.png', 302: 'rune_3b.png',
+  401: 'rune_4a.png', 402: 'rune_4b.png',
+  501: 'rune_5a.png', 502: 'rune_5b.png',
+  601: 'rune_6a.png', 602: 'rune_6b.png',
+  701: 'rune_7a.png', 702: 'rune_7b.png',
+  801: 'rune_8a.png', 802: 'rune_8b.png',
+};
+
+/** Riddle bank: key = file name in /public/riddles, answer = number 0..99 */
+const RIDDLE_BANK = [
+  { key: 'riddle_01.png', answer: 7 },
+  { key: 'riddle_02.png', answer: 42 },
+  { key: 'riddle_03.png', answer: 13 },
+  // extend as needed
+];
+
+/* ── Small helpers ────────────────────────────────────────────────────── */
+
+/** Issue a short-lived JWT token for the user. */
 function sign(user) {
   return jwt.sign({ tg_id: user.tg_id, name: user.name }, JWT_SECRET, { expiresIn: '1h' });
 }
 
+/** Generate a unique referral code (best-effort with a few retries). */
 async function genUniqueCode() {
   for (let i = 0; i < 8; i++) {
     const code = crypto.randomBytes(6).toString('base64url');
@@ -39,33 +87,107 @@ async function genUniqueCode() {
   return crypto.randomBytes(6).toString('base64url');
 }
 
-/* ── Core burn logic ─────────────────────────────────────────────────── */
 /**
- * runBurnLogic(invoiceId)
- * 1) гарантия: до #1–#3 проклятий нет; первые ДВА платных — всегда фрагмент
- * 2) лимит проклятий: MAX_CURSES
- * 3) выдаём случайный недостающий фрагмент из PAID_POOL
- * Возвращает: { newFragment, cursed, pity_counter, curse_expires, awarded_rarity? }
+ * Sign asset URL (riddles/runes) with HMAC; dev fallback returns plain URL.
+ * @param {string} prefix e.g. '/riddles' or '/runes'
+ * @param {string} name   file name inside /public/<folder>
+ * @param {number} ttlSec seconds until link expires
+ */
+function signAssetUrl(prefix, name, ttlSec = RIDDLE_URL_TTL_SEC) {
+  if (!FRAG_HMAC_SECRET) {
+    // Dev: return a plain, non-expiring URL.
+    return `${prefix}/${encodeURIComponent(name)}`;
+  }
+  const exp = Math.floor(Date.now() / 1000) + ttlSec;
+  const payload = `${name}|${exp}`;
+  const sig = crypto.createHmac('sha256', FRAG_HMAC_SECRET).update(payload).digest('hex');
+  return `${prefix}/${encodeURIComponent(name)}?exp=${exp}&sig=${sig}`;
+}
+
+/** In-place Fisher–Yates shuffle using crypto.randomInt. */
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/** Build a 4x4 grid of unique numbers (0..99) with a guaranteed correct value. */
+function makeGridNumbers(correctNum) {
+  const set = new Set([correctNum]);
+  while (set.size < 16) {
+    const n = crypto.randomInt(100);
+    if (!set.has(n)) set.add(n);
+  }
+  const arr = Array.from(set);
+  shuffleInPlace(arr);
+  const correctCell = arr.findIndex((n) => n === correctNum);
+  return { arr, correctCell };
+}
+
+/**
+ * Ensure a personal cipher exists for (tg_id, frag_id). No-op if already present.
+ * Stores: 4x4 grid, correct number and cell, and the riddle key.
+ */
+async function ensureCipherForFragment(clientOrPool, tgId, fragId) {
+  const db = clientOrPool || pool;
+
+  const { rows: existing } = await db.query(
+    `SELECT tg_id FROM fragment_ciphers WHERE tg_id=$1 AND frag_id=$2 LIMIT 1`,
+    [tgId, fragId]
+  );
+  if (existing.length) return;
+
+  const ridx = crypto.randomInt(RIDDLE_BANK.length);
+  const riddle = RIDDLE_BANK[ridx];
+  const { arr: grid, correctCell } = makeGridNumbers(riddle.answer);
+
+  await db.query(
+    `INSERT INTO fragment_ciphers
+       (tg_id, frag_id, grid_numbers, correct_num, correct_cell, riddle_key)
+     VALUES ($1,$2,$3::int[],$4,$5,$6)`,
+    [tgId, fragId, grid, riddle.answer, correctCell, riddle.key]
+  );
+}
+
+/* ── Burn core logic ─────────────────────────────────────────────────── */
+
+/**
+ * Transactional burn resolution for a PAID invoice.
+ *
+ * Rules:
+ *  1) No curses before fragments #1–#3 are owned; first two paid burns always grant a fragment.
+ *  2) Up to MAX_CURSES curses in total.
+ *  3) Otherwise pick a random missing fragment from PAID_POOL.
+ *
+ * Persists result into burn_invoices.result_json (idempotent).
+ * @returns {Promise<{ok: boolean, newFragment: number|null, cursed: boolean, pity_counter: number, curse_expires: string|null, awarded_rarity: string|null }>}
  */
 async function runBurnLogic(invoiceId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) invoice lock (+ берём quest_data, чтобы достать rarity)
+    // Lock invoice
     const { rows: [inv] } = await client.query(
-      `SELECT tg_id, processed, quest_data
+      `SELECT tg_id, processed, quest_data, result_json
          FROM burn_invoices
         WHERE invoice_id=$1 AND status='paid'
         FOR UPDATE`,
       [invoiceId]
     );
-    if (!inv || inv.processed) {
+    if (!inv) {
       await client.query('ROLLBACK');
-      return { newFragment: null, cursed: false, pity_counter: null, curse_expires: null };
+      return { ok: false, error: 'invoice_not_found' };
+    }
+    if (inv.processed) {
+      await client.query('ROLLBACK');
+      // Return previously saved result to keep idempotency.
+      return inv.result_json || { ok: true, newFragment: null, cursed: false, pity_counter: null, curse_expires: null };
     }
 
-    // 2) player lock
+    // Lock player
     const { rows: [pl] } = await client.query(
       `SELECT fragments, curses_count, pity_counter
          FROM players
@@ -73,25 +195,24 @@ async function runBurnLogic(invoiceId) {
         FOR UPDATE`,
       [inv.tg_id]
     );
+
     const fr = Array.isArray(pl?.fragments) ? pl.fragments.map(Number) : [];
     let cursesCount = Number(pl?.curses_count || 0);
     let pity        = Number(pl?.pity_counter || 0);
 
     const hasTutorial  = MANDATORY.every(x => fr.includes(x));
-    const paidOwned    = fr.filter(n => n >= 4).length; // сколько платных уже есть
-    const guaranteeTwo = hasTutorial && paidOwned < 2;  // первые 2 платных — всегда фрагмент
+    const paidOwned    = fr.filter(n => n >= 4).length;
+    const guaranteeTwo = hasTutorial && paidOwned < 2;
     const canCurseMore = cursesCount < MAX_CURSES;
 
-    // 3) решить: порча или фрагмент
+    // Decide: curse or fragment
     let giveCurse = false;
     if (!hasTutorial) {
       giveCurse = false;
     } else if (guaranteeTwo) {
       giveCurse = false;
     } else if (canCurseMore) {
-      giveCurse = Math.random() < CURSE_CHANCE;
-    } else {
-      giveCurse = false;
+      giveCurse = (crypto.randomInt(1_000_000) / 1_000_000) < CURSE_CHANCE;
     }
 
     if (giveCurse) {
@@ -129,10 +250,10 @@ async function runBurnLogic(invoiceId) {
       );
 
       await client.query('COMMIT');
-      return { ...result };
+      return result;
     }
 
-    // 4) выдаём фрагмент из PAID_POOL
+    // Grant a fragment from the paid pool
     const remaining = PAID_POOL.filter(id => !fr.includes(id));
     const pick = remaining.length ? remaining[crypto.randomInt(remaining.length)] : null;
 
@@ -150,9 +271,10 @@ async function runBurnLogic(invoiceId) {
         [inv.tg_id, pick]
       );
 
+      try { await ensureCipherForFragment(client, inv.tg_id, pick); } catch {}
       pity = 0;
     } else {
-      // всё собрано — редкий кейс
+      // All collected — rare case
       pity += 1;
       await client.query(
         `UPDATE players SET last_burn = NOW(), pity_counter = $2 WHERE tg_id=$1`,
@@ -181,7 +303,7 @@ async function runBurnLogic(invoiceId) {
     );
 
     await client.query('COMMIT');
-    return { ...result };
+    return result;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -190,14 +312,20 @@ async function runBurnLogic(invoiceId) {
   }
 }
 
-/* ── Routes ──────────────────────────────────────────────────────────── */
-// 1) INIT — создаём игрока и дарим фрагмент #1
+/* ── Routes ───────────────────────────────────────────────────────────── */
+
+/**
+ * POST /api/init
+ * Create (or fetch) a player, gift fragment #1, handle referral, and return JWT.
+ */
 router.post('/init', async (req, res) => {
   const { tg_id, name = '', initData, referrer_code = null } = req.body;
   if (!tg_id || !initData) return res.status(400).json({ error: 'tg_id and initData required' });
+
   try {
     const { rows } = await pool.query(`SELECT 1 FROM players WHERE tg_id=$1`, [tg_id]);
     let player;
+
     if (!rows.length) {
       const client = await pool.connect();
       await client.query('BEGIN');
@@ -211,6 +339,9 @@ router.post('/init', async (req, res) => {
           [tg_id, name.trim() || null, code]
         );
         player = me;
+
+        try { await ensureCipherForFragment(client, tg_id, 1); } catch {}
+
         if (referrer_code) {
           const { rows: [ref] } = await client.query(
             `SELECT tg_id FROM players WHERE ref_code=$1 LIMIT 1`,
@@ -224,6 +355,7 @@ router.post('/init', async (req, res) => {
             );
           }
         }
+
         await client.query(`UPDATE global_stats SET value=value+1 WHERE id='total_users'`);
         await client.query('COMMIT');
       } catch (e) {
@@ -236,6 +368,7 @@ router.post('/init', async (req, res) => {
       const { rows: [me] } = await pool.query(`SELECT * FROM players WHERE tg_id=$1`, [tg_id]);
       player = me;
     }
+
     const token = sign(player);
     res.json({ user: player, token });
   } catch (err) {
@@ -244,9 +377,15 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// 2) GET /api/player/:tg_id
-router.get('/player/:tg_id', async (req, res) => {
+/**
+ * GET /api/player/:tg_id
+ * Fetch current player public fields. Requires auth; user must match tg_id.
+ */
+router.get('/player/:tg_id', authenticate, async (req, res) => {
   try {
+    if (String(req.user.tg_id) !== String(req.params.tg_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const { rows } = await pool.query(
       `SELECT tg_id,name,fragments,last_burn,curses_count,pity_counter,is_cursed,curse_expires
          FROM players WHERE tg_id=$1`,
@@ -259,13 +398,109 @@ router.get('/player/:tg_id', async (req, res) => {
   }
 });
 
-// auth required after this
+/** Everything below requires auth. */
 router.use(authenticate);
 
-// 3) GET /api/fragments/:tg_id
+/**
+ * GET /api/cipher/all
+ * Returns { byFragment: { [fragId]: { runeId, answered } }, urls?: { [runeId]: url } }
+ * If ?includeUrls=1, pre-sign and include rune URLs for known runeIds.
+ */
+router.get('/cipher/all', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT frag_id, chosen_rune_id, answered_at
+         FROM fragment_ciphers
+        WHERE tg_id=$1`,
+      [res.req.user.tg_id]
+    );
+
+    const byFragment = {};
+    const runeIds = new Set();
+
+    for (const r of rows) {
+      const fragId = Number(r.frag_id);
+      const runeId = r.chosen_rune_id ? Number(r.chosen_rune_id) : null;
+      byFragment[fragId] = { runeId, answered: !!r.answered_at };
+      if (runeId) runeIds.add(runeId);
+    }
+
+    let urls;
+    if (String(res.req.query.includeUrls || '') === '1') {
+      urls = {};
+      for (const id of runeIds) {
+        const name = RUNE_ASSETS[id];
+        if (!name) continue;
+        urls[id] = signAssetUrl('/runes', name, RUNE_URL_TTL_SEC);
+      }
+    }
+
+    return res.json({ byFragment, urls });
+  } catch (err) {
+    console.error('[GET /api/cipher/all] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+/**
+ * GET /api/cipher/:fragId
+ * Returns 4x4 grid + riddle image URL (HMAC-signed).
+ */
+router.get('/cipher/:fragId', async (req, res) => {
+  try {
+    const fragId = Number(req.params.fragId);
+    if (!Number.isFinite(fragId) || fragId < 1 || fragId > 8) {
+      return res.status(400).json({ error: 'bad_frag_id' });
+    }
+
+    // Ownership check
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+    const owned = Array.isArray(p?.fragments) ? p.fragments.map(Number) : [];
+    if (!owned.includes(fragId)) return res.status(403).json({ error: 'fragment_not_owned' });
+
+    // Ensure cipher exists
+    await ensureCipherForFragment(pool, req.user.tg_id, fragId);
+
+    const { rows } = await pool.query(
+      `SELECT grid_numbers, riddle_key, chosen_rune_id, answered_at
+         FROM fragment_ciphers
+        WHERE tg_id=$1 AND frag_id=$2`,
+      [req.user.tg_id, fragId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'cipher_not_found' });
+
+    const row = rows[0];
+    const url = signAssetUrl('/riddles', row.riddle_key, RIDDLE_URL_TTL_SEC);
+
+    return res.json({
+      fragId,
+      riddle: { type: 'image', url, ttl: RIDDLE_URL_TTL_SEC },
+      gridNumbers: row.grid_numbers,
+      answered: !!row.answered_at,
+      chosenRuneId: row.chosen_rune_id || null,
+    });
+  } catch (err) {
+    console.error('[GET /api/cipher/:fragId] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+/**
+ * GET /api/fragments/:tg_id
+ * Returns the current list of player's fragments.
+ */
 router.get('/fragments/:tg_id', async (req, res) => {
   try {
-    const { rows: [p] } = await pool.query(`SELECT fragments FROM players WHERE tg_id=$1`, [req.params.tg_id]);
+    if (String(req.user.tg_id) !== String(req.params.tg_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [req.params.tg_id]
+    );
     if (!p) return res.status(404).json({ error: 'not found' });
     res.json({ fragments: p.fragments || [] });
   } catch (err) {
@@ -273,41 +508,48 @@ router.get('/fragments/:tg_id', async (req, res) => {
   }
 });
 
-/** 4) POST /api/burn-invoice — создаём счёт + мини-квест
- *   Блокируем, если у игрока нет #1–#3
- *   Если AUTO_PAY_BURN=true|1 — сразу помечаем paid (временная автооплата)
+/**
+ * POST /api/burn-invoice
+ * Creates an invoice and a mini-quest payload. Optionally auto-marks as paid.
  */
 router.post('/burn-invoice', async (req, res) => {
   const { tg_id } = req.body;
+
   if (!tg_id) return res.status(400).json({ error: 'tg_id required' });
+  if (String(req.user.tg_id) !== String(tg_id)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
   try {
-    const { rows: [pp] } = await pool.query(`SELECT fragments, pity_counter FROM players WHERE tg_id=$1`, [tg_id]);
+    const { rows: [pp] } = await pool.query(
+      `SELECT fragments, pity_counter FROM players WHERE tg_id=$1`,
+      [tg_id]
+    );
     const fr = Array.isArray(pp?.fragments) ? pp.fragments.map(Number) : [];
     const pity = Number(pp?.pity_counter || 0);
 
     const hasMandatory = MANDATORY.every(id => fr.includes(id));
-    if (!hasMandatory) {
-      return res.status(403).json({ error: 'need_fragments_1_2_3' });
-    }
+    if (!hasMandatory) return res.status(403).json({ error: 'need_fragments_1_2_3' });
 
     const invoiceId = uuid();
     const comment   = crypto.randomBytes(4).toString('hex');
 
-    // pity → вес редкости
+    // pity -> rarity weights boost
     const boost = Math.min(pity, 20);
     const weights = { legendary: 5, rare: 15 + boost, uncommon: 30 };
     weights.common = Math.max(0, 100 - (weights.legendary + weights.rare + weights.uncommon));
 
     const total = Object.values(weights).reduce((a, b) => a + b, 0);
-    let r = Math.random() * total;
+    let r = (crypto.randomInt(1_000_000) / 1_000_000) * total;
     let rarity = 'common';
     for (const [k, w] of Object.entries(weights)) { if (r < w) { rarity = k; break; } r -= w; }
 
+    // Quiz bank per rarity
     const quizzes = {
-      common:    { question: 'Какой элемент ассоциируется с огнём?', options: ['Water','Earth','Fire','Air'], answer: 'Fire' },
-      uncommon:  { question: 'Синоним слова "burn"?',               options: ['Freeze','Scorch','Flow','Sink'], answer: 'Scorch' },
-      rare:      { question: 'Что потребляет кислород и даёт тепло?', options: ['Ice','Fire'], answer: 'Fire' },
-      legendary: { question: 'Введите слово "Fire" точно:',         options: [], answer: 'Fire' },
+      common:    { question: 'Which element is associated with fire?', options: ['Water', 'Earth', 'Fire', 'Air'], answer: 'Fire' },
+      uncommon:  { question: 'A synonym for "burn"?',                  options: ['Freeze', 'Scorch', 'Flow', 'Sink'], answer: 'Scorch' },
+      rare:      { question: 'What consumes oxygen and gives heat?',   options: ['Ice', 'Fire'], answer: 'Fire' },
+      legendary: { question: 'Type the word "Fire" exactly:',          options: [], answer: 'Fire' },
     };
     const task = { type: 'quiz', rarity, params: quizzes[rarity] };
 
@@ -318,7 +560,7 @@ router.post('/burn-invoice', async (req, res) => {
       [invoiceId, tg_id, AMOUNT_NANO, TON_ADDR, comment, task]
     );
 
-    // Временная авто-оплата (dev/стейдж)
+    // Optional auto-payment (dev/stage)
     const auto = String(AUTO_PAY_BURN || '').toLowerCase();
     const autoPay = auto === 'true' || auto === '1';
     if (autoPay) {
@@ -333,7 +575,7 @@ router.post('/burn-invoice', async (req, res) => {
       paymentUrl:  `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
       tonspaceUrl: `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
       task,
-      paid: autoPay, // фронту можно показать, что оплата уже засчитана
+      paid: autoPay,
     });
   } catch (err) {
     console.error('[POST /api/burn-invoice] ERROR:', err);
@@ -341,7 +583,10 @@ router.post('/burn-invoice', async (req, res) => {
   }
 });
 
-// 5) GET /api/burn-status/:invoiceId — после оплаты отдаём квест
+/**
+ * GET /api/burn-status/:invoiceId
+ * Returns payment state; once processed, returns the saved result.
+ */
 router.get('/burn-status/:invoiceId', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -353,12 +598,11 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
     );
     if (!inv) return res.status(404).json({ error: 'not found' });
 
-    // Если уже обработан, клиенту не надо снова показывать квест
     if (inv.processed) {
       return res.json({ paid: true, task: null, processed: true, result: inv.result_json || null });
     }
-
     if (inv.status !== 'paid') return res.json({ paid: false });
+
     return res.json({ paid: true, task: inv.quest_data || null, processed: false });
   } catch (err) {
     return res.status(500).json({ error: 'internal' });
@@ -366,10 +610,98 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
 });
 
 /**
- * 6) POST /api/burn-complete/:invoiceId — результат мини-квеста (идемпотентно)
- *   — При повторных вызовах возвращаем уже сохранённый result_json.
- *   — На fail: фиксируем pity+1, ставим quest_status='failed', processed=TRUE, result_json.
- *   — На success: вызываем runBurnLogic (один раз), он сохранит result_json и success.
+ * POST /api/cipher-answer/:fragId
+ * Body: { chosenNumber: int }
+ * Idempotent: if already answered, returns the same chosen rune.
+ *
+ * NOTE: At the moment we only require the number to exist in the grid.
+ *       If you want to enforce the "correct" number, also compare with stored correct_num.
+ */
+router.post('/cipher-answer/:fragId', async (req, res) => {
+  try {
+    const fragId = Number(req.params.fragId);
+    const chosenNumber = Number(req.body?.chosenNumber);
+
+    if (!Number.isFinite(fragId) || fragId < 1 || fragId > 8) {
+      return res.status(400).json({ error: 'bad_frag_id' });
+    }
+    if (!Number.isFinite(chosenNumber) || chosenNumber < 0 || chosenNumber > 99) {
+      return res.status(400).json({ error: 'bad_number' });
+    }
+
+    // Ownership check
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+    const owned = Array.isArray(p?.fragments) ? p.fragments.map(Number) : [];
+    if (!owned.includes(fragId)) return res.status(403).json({ error: 'fragment_not_owned' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
+        `SELECT grid_numbers, chosen_num, chosen_cell, chosen_rune_id
+           FROM fragment_ciphers
+          WHERE tg_id=$1 AND frag_id=$2
+          FOR UPDATE`,
+        [req.user.tg_id, fragId]
+      );
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'cipher_not_found' });
+      }
+
+      const row = rows[0];
+
+      // Idempotency: if already answered -> return the same rune
+      if (row.chosen_rune_id) {
+        await client.query('COMMIT');
+        return res.json({ ok: true, symbolId: row.chosen_rune_id });
+      }
+
+      const idx = row.grid_numbers.findIndex((n) => Number(n) === chosenNumber);
+      if (idx < 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'number_not_in_grid' });
+      }
+
+      // Choose a random rune from the pair for this fragment
+      const pair = RUNE_PAIRS[fragId] || [];
+      if (pair.length !== 2) {
+        await client.query('ROLLBACK');
+        return res.status(500).json({ error: 'rune_pair_not_found' });
+      }
+      const symbolId = pair[crypto.randomInt(2)];
+
+      await client.query(
+        `UPDATE fragment_ciphers
+            SET chosen_num=$3,
+                chosen_cell=$4,
+                chosen_rune_id=$5,
+                answered_at=NOW()
+          WHERE tg_id=$1 AND frag_id=$2`,
+        [req.user.tg_id, fragId, chosenNumber, idx, symbolId]
+      );
+
+      await client.query('COMMIT');
+      return res.json({ ok: true, symbolId });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[POST /cipher-answer/:fragId] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+/**
+ * POST /api/burn-complete/:invoiceId
+ * Idempotent result submission. On success -> run burn logic.
  */
 router.post('/burn-complete/:invoiceId', async (req, res) => {
   const { success } = req.body;
@@ -381,7 +713,7 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Лочим инвойс
+    // Lock invoice
     const { rows: [inv] } = await client.query(
       `SELECT invoice_id, tg_id, status, processed, quest_status, result_json
          FROM burn_invoices
@@ -389,29 +721,35 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
         FOR UPDATE`,
       [req.params.invoiceId]
     );
-    if (!inv) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'invoice not found' }); }
+    if (!inv) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'invoice not found' });
+    }
 
-    // Если уже есть сохранённый результат — возвращаем его как есть
+    // Already has a saved result -> return it as-is
     if (inv.result_json) {
       await client.query('COMMIT');
       return res.json(inv.result_json);
     }
 
-    // На этом этапе result_json ещё нет. Если статус не paid — это логическая ошибка фронта
+    // Not paid -> client logic error
     if (inv.status !== 'paid') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'invoice not paid' });
     }
 
     if (!success) {
-      // Идемпотентный fail: pity+1, фиксируем как processed, чтобы нельзя было затем прислать success
+      // Idempotent fail: pity+1, mark as processed and store result
       const { rows: [pl] } = await client.query(
         `SELECT pity_counter FROM players WHERE tg_id=$1 FOR UPDATE`,
         [inv.tg_id]
       );
       const newPity = Number(pl?.pity_counter || 0) + 1;
 
-      await client.query(`UPDATE players SET pity_counter=$2 WHERE tg_id=$1`, [inv.tg_id, newPity]);
+      await client.query(
+        `UPDATE players SET pity_counter=$2 WHERE tg_id=$1`,
+        [inv.tg_id, newPity]
+      );
 
       const result = { ok: false, pity_counter: newPity };
 
@@ -428,11 +766,11 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
       return res.json(result);
     }
 
-    // success === true → запускаем выдачу (один раз)
-    await client.query('COMMIT'); // выходим из транзакции перед вызовом логики (она сама транзакционная)
+    // success === true -> run burn resolver (it is transactional inside)
+    await client.query('COMMIT');
     const result = await runBurnLogic(req.params.invoiceId);
 
-    // runBurnLogic уже сохранил result_json и success; на всякий случай — синхронизируем статус
+    // Sync status just in case
     try {
       await pool.query(
         `UPDATE burn_invoices
@@ -452,7 +790,10 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
   }
 });
 
-// 7) Referral
+/**
+ * GET /api/referral
+ * Returns ref code, invited count and reward flag. Also rotates JWT via header.
+ */
 router.get('/referral', async (req, res) => {
   try {
     const { rows: [p] } = await pool.query(
@@ -460,17 +801,27 @@ router.get('/referral', async (req, res) => {
       [req.user.tg_id]
     );
     if (!p) return res.status(404).json({ error: 'not found' });
+
     const { rows: [c] } = await pool.query(
       `SELECT COUNT(*) AS cnt FROM referrals WHERE referrer_id=$1 AND status='confirmed'`,
       [req.user.tg_id]
     );
+
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
-    return res.json({ refCode: p.ref_code, invitedCount: Number(c.cnt), rewardIssued: p.referral_reward_issued });
+    return res.json({
+      refCode: p.ref_code,
+      invitedCount: Number(c.cnt),
+      rewardIssued: p.referral_reward_issued,
+    });
   } catch (err) {
     return res.status(500).json({ error: 'internal' });
   }
 });
 
+/**
+ * POST /api/referral/claim
+ * Claim referral reward (needs >= 3 confirmed referrals), grants fragment #2.
+ */
 router.post('/referral/claim', async (req, res) => {
   try {
     const { rows: [p] } = await pool.query(
@@ -494,6 +845,8 @@ router.post('/referral/claim', async (req, res) => {
       [req.user.tg_id]
     );
 
+    try { await ensureCipherForFragment(pool, req.user.tg_id, 2); } catch {}
+
     res.setHeader('Authorization', `Bearer ${sign(req.user)}`);
     return res.json({ ok: true, awarded: [2] });
   } catch (err) {
@@ -501,14 +854,25 @@ router.post('/referral/claim', async (req, res) => {
   }
 });
 
-// 8) Third fragment quest
-router.get('/third-quest', async (req, res) => {
+/**
+ * GET /api/third-quest
+ * Announces availability of the third fragment quiz (if not owned yet).
+ */
+router.get('/third-quest', async (_req, res) => {
   try {
-    const { rows: [p] } = await pool.query(`SELECT fragments FROM players WHERE tg_id=$1`, [req.user.tg_id]);
-    const owned = Array.isArray(p?.fragments) ? p.fragments : [];
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [res.req.user.tg_id]
+    );
+    const owned = Array.isArray(p?.fragments) ? p.fragments.map(Number) : [];
     if (owned.includes(3)) return res.json({ available: false });
 
-    const task = { type: 'quiz', question: 'Choose the correct rune meaning for 🔥', options: ['Water', 'Ash', 'Flame', 'Stone'], answer: 'Flame' };
+    const task = {
+      type: 'quiz',
+      question: 'Choose the correct rune meaning for 🔥',
+      options: ['Water', 'Ash', 'Flame', 'Stone'],
+      answer: 'Flame',
+    };
     return res.json({ available: true, task });
   } catch (err) {
     console.error('[GET /third-quest] ERROR:', err);
@@ -516,11 +880,18 @@ router.get('/third-quest', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/third-claim
+ * Validates answer and grants fragment #3 once.
+ */
 router.post('/third-claim', async (req, res) => {
   try {
     const { answer } = req.body || {};
-    const { rows: [p] } = await pool.query(`SELECT fragments FROM players WHERE tg_id=$1`, [req.user.tg_id]);
-    const owned = Array.isArray(p?.fragments) ? p.fragments : [];
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+    const owned = Array.isArray(p?.fragments) ? p.fragments.map(Number) : [];
     if (owned.includes(3)) return res.json({ ok: true, awarded: [] });
 
     const correct = (answer === 'Flame');
@@ -530,6 +901,8 @@ router.post('/third-claim', async (req, res) => {
       `UPDATE players SET fragments = array_append(coalesce(fragments,'{}'::int[]), 3) WHERE tg_id=$1`,
       [req.user.tg_id]
     );
+    try { await ensureCipherForFragment(pool, req.user.tg_id, 3); } catch {}
+
     return res.json({ ok: true, awarded: [3] });
   } catch (err) {
     console.error('[POST /third-claim] ERROR:', err);
@@ -537,13 +910,16 @@ router.post('/third-claim', async (req, res) => {
   }
 });
 
-// 9) Leaderboard / Delete / Stats / Daily quest (без изменений логики)
-router.get('/leaderboard', authenticate, async (req, res) => {
+/**
+ * GET /api/leaderboard
+ * Top-10 by total TON paid.
+ */
+router.get('/leaderboard', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT p.tg_id, p.name,
-             COUNT(b.invoice_id)         AS total_burns,
-             SUM(b.amount_nano)::bigint  AS total_ton_nano
+             COUNT(b.invoice_id)        AS total_burns,
+             SUM(b.amount_nano)::bigint AS total_ton_nano
         FROM players p
         JOIN burn_invoices b ON b.tg_id = p.tg_id
        WHERE b.status = 'paid'
@@ -551,7 +927,12 @@ router.get('/leaderboard', authenticate, async (req, res) => {
        ORDER BY total_ton_nano DESC
        LIMIT 10
     `);
-    const result = rows.map(r => ({ tg_id: r.tg_id, name: r.name, totalBurns: Number(r.total_burns), totalTon: Number(r.total_ton_nano) / 1e9 }));
+    const result = rows.map(r => ({
+      tg_id: r.tg_id,
+      name: r.name,
+      totalBurns: Number(r.total_burns),
+      totalTon: Number(r.total_ton_nano) / 1e9,
+    }));
     res.json(result);
   } catch (err) {
     console.error('[GET /api/leaderboard] ERROR:', err);
@@ -559,10 +940,15 @@ router.get('/leaderboard', authenticate, async (req, res) => {
   }
 });
 
+/**
+ * DELETE /api/player/:tg_id
+ * Full account deletion (player, invoices, referrals).
+ */
 router.delete('/player/:tg_id', async (req, res) => {
-  if (String(req.user.tg_id) !== req.params.tg_id) {
+  if (String(req.user.tg_id) !== String(req.params.tg_id)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -580,30 +966,46 @@ router.delete('/player/:tg_id', async (req, res) => {
   }
 });
 
-router.get('/stats/:tg_id', authenticate, async (req, res) => {
+/**
+ * GET /api/stats/:tg_id
+ * Simple aggregates for the user (total burns and TON spent).
+ */
+router.get('/stats/:tg_id', async (req, res) => {
   try {
+    if (String(req.user.tg_id) !== String(req.params.tg_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const { rows: [stats] } = await pool.query(
       `SELECT COUNT(b.invoice_id) AS total_burns, COALESCE(SUM(b.amount_nano), 0) AS total_ton_nano
          FROM burn_invoices b
         WHERE b.tg_id = $1 AND b.status = 'paid'`,
       [req.params.tg_id]
     );
-    return res.json({ totalBurns: Number(stats.total_burns), totalTon: Number(stats.total_ton_nano) / 1e9 });
+    return res.json({
+      totalBurns: Number(stats.total_burns),
+      totalTon: Number(stats.total_ton_nano) / 1e9,
+    });
   } catch (err) {
     console.error('[GET /api/stats] ERROR:', err);
     return res.status(500).json({ error: 'internal' });
   }
 });
 
-router.get('/daily-quest', authenticate, async (req, res) => {
+/**
+ * GET /api/daily-quest
+ * Returns daily-quest availability and (optional) coupon percent.
+ */
+router.get('/daily-quest', async (_req, res) => {
   try {
     const { rows: [p] } = await pool.query(
       `SELECT last_daily_claim, daily_coupon_percent FROM players WHERE tg_id=$1`,
-      [req.user.tg_id]
+      [res.req.user.tg_id]
     );
     if (!p) return res.status(404).json({ error: 'player not found' });
+
     const today = new Date().toISOString().split('T')[0];
     const canClaim = p.last_daily_claim !== today;
+
     return res.json({ canClaim, coupon: p.daily_coupon_percent });
   } catch (err) {
     console.error('[GET /daily-quest] ERROR:', err);
@@ -611,15 +1013,28 @@ router.get('/daily-quest', authenticate, async (req, res) => {
   }
 });
 
-router.post('/daily-quest/claim', authenticate, async (req, res) => {
+/**
+ * POST /api/daily-quest/claim
+ * Simple daily reward that sets a discount coupon once per day.
+ */
+router.post('/daily-quest/claim', async (_req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
-    const { rows: [p] } = await pool.query(`SELECT last_daily_claim FROM players WHERE tg_id=$1`, [req.user.tg_id]);
+    const { rows: [p] } = await pool.query(
+      `SELECT last_daily_claim FROM players WHERE tg_id=$1`,
+      [res.req.user.tg_id]
+    );
     if (!p) return res.status(404).json({ error: 'player not found' });
-    if (p.last_daily_claim === today) return res.status(400).json({ error: 'Already claimed today' });
+    if (p.last_daily_claim === today) {
+      return res.status(400).json({ error: 'Already claimed today' });
+    }
 
     const couponPercent = 30;
-    await pool.query(`UPDATE players SET last_daily_claim=$2, daily_coupon_percent=$3 WHERE tg_id=$1`, [req.user.tg_id, today, couponPercent]);
+    await pool.query(
+      `UPDATE players SET last_daily_claim=$2, daily_coupon_percent=$3 WHERE tg_id=$1`,
+      [res.req.user.tg_id, today, couponPercent]
+    );
+
     return res.json({ coupon: couponPercent });
   } catch (err) {
     console.error('[POST /daily-quest/claim] ERROR:', err);
@@ -627,7 +1042,10 @@ router.post('/daily-quest/claim', authenticate, async (req, res) => {
   }
 });
 
-// 10) Debug endpoints
+/**
+ * POST /api/debug/grant-fragments
+ * Dev helper to grant fragments; secured in production via DEBUG_KEY.
+ */
 router.post('/debug/grant-fragments', async (req, res) => {
   try {
     if (NODE_ENV === 'production' && (!DEBUG_KEY || req.headers['x-debug-key'] !== DEBUG_KEY)) {
@@ -636,8 +1054,11 @@ router.post('/debug/grant-fragments', async (req, res) => {
     const want = Array.isArray(req.body?.fragments) ? req.body.fragments.map(Number) : [];
     if (!want.length) return res.status(400).json({ error: 'fragments array required' });
 
-    const { rows: [p] } = await pool.query(`SELECT fragments FROM players WHERE tg_id=$1`, [req.user.tg_id]);
-    const owned = Array.isArray(p?.fragments) ? p.fragments : [];
+    const { rows: [p] } = await pool.query(
+      `SELECT fragments FROM players WHERE tg_id=$1`,
+      [req.user.tg_id]
+    );
+    const owned = Array.isArray(p?.fragments) ? p.fragments.map(Number) : [];
     const set = new Set(owned);
     want.forEach(x => set.add(x));
     const merged = Array.from(set).sort((a, b) => a - b);
@@ -646,13 +1067,41 @@ router.post('/debug/grant-fragments', async (req, res) => {
 
     await pool.query(
       `UPDATE players
-          SET fragments=$2, referral_reward_issued = CASE WHEN $3 THEN TRUE ELSE referral_reward_issued END
+          SET fragments=$2,
+              referral_reward_issued = CASE WHEN $3 THEN TRUE ELSE referral_reward_issued END
         WHERE tg_id=$1`,
       [req.user.tg_id, merged, setReferral]
     );
+
     return res.json({ ok: true, fragments: merged });
   } catch (err) {
     console.error('[POST /debug/grant-fragments] ERROR:', err);
+    return res.status(500).json({ error: 'internal' });
+  }
+});
+
+/**
+ * GET /api/runes/urls?ids=101,202,...
+ * Returns signed URLs for requested rune ids.
+ */
+router.get('/runes/urls', async (req, res) => {
+  try {
+    const ids = String(req.query.ids || '')
+      .split(',')
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n));
+
+    if (!ids.length) return res.json({ urls: {} });
+
+    const urls = {};
+    for (const id of ids) {
+      const name = RUNE_ASSETS[id];
+      if (!name) continue;
+      urls[id] = signAssetUrl('/runes', name, RUNE_URL_TTL_SEC);
+    }
+    return res.json({ urls });
+  } catch (err) {
+    console.error('[GET /api/runes/urls] ERROR:', err);
     return res.status(500).json({ error: 'internal' });
   }
 });
