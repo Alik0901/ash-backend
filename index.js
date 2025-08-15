@@ -1,4 +1,4 @@
-// index.js (polished)
+// index.js
 // Express bootstrap for Order of Ash backend
 // Notes:
 // - Maintains original behavior, but structure, readability, and consistency are improved
@@ -61,19 +61,6 @@ const ROOT_DIR = __dirname; // repo root entry assumed
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const IMAGES_DIR = path.join(PUBLIC_DIR, 'images');
 const FRAGMENTS_DIR = path.join(PUBLIC_DIR, 'fragments');
-
-// Fragment filenames (explicit allow-list)
-const FRAGMENT_FILES = [
-  'fragment_1_the_whisper.jpg',
-  'fragment_2_the_number.jpg',
-  'fragment_3_the_language.jpg',
-  'fragment_4_the_mirror.jpg',
-  'fragment_5_the_chain.jpg',
-  'fragment_6_the_hour.jpg',
-  'fragment_7_the_mark.jpg',
-  'fragment_8_the_gate.jpg',
-];
-const FINAL_IMAGE = 'final-image.jpg';
 
 // API
 const PORT = Number(PORT_ENV || 3000);
