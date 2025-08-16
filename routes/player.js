@@ -1094,33 +1094,68 @@ router.post('/debug/grant-fragments', async (req, res) => {
   }
 });
 
-// POST /api/debug/reset-ciphers  — сбросить выбранные руны у игрока
+// POST /api/debug/reset-ciphers  — сбросить выбранные руны у игрока + ПЕРЕРОЛЛ сетки/загадки
 router.post('/debug/reset-ciphers', async (req, res) => {
   try {
     const key = req.get('X-Debug-Key') || '';
     if (!process.env.DEBUG_KEY || key !== process.env.DEBUG_KEY) {
-      return res.status(404).json({ error: 'not_found' }); // маскируем в проде
+      // маскируем в проде
+      return res.status(404).json({ error: 'not_found' });
     }
-    const authTg = req.user?.tg_id;
-    const { tg_id = authTg } = req.body || {};
+
+    const tgIdFromJwt = req.user?.tg_id;
+    const { tg_id = tgIdFromJwt } = req.body || {};
     if (!tg_id) return res.status(400).json({ error: 'bad_tg_id' });
 
-    const q = await pool.query(
-      `UPDATE fragment_ciphers
-         SET chosen_num = NULL,
-             chosen_cell = NULL,
-             chosen_rune_id = NULL,
-             answered_at = NULL
-       WHERE tg_id = $1`,
-      [tg_id]
-    );
-    return res.json({ ok: true, reset: q.rowCount });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // берём все существующие персональные шифры игрока
+      const { rows: list } = await client.query(
+        `SELECT frag_id FROM fragment_ciphers WHERE tg_id = $1 ORDER BY frag_id`,
+        [tg_id]
+      );
+
+      let reset = 0;
+
+      for (const r of list) {
+        const fragId = Number(r.frag_id);
+
+        // новая загадка и новая 4×4 сетка с гарантированным правильным числом
+        const ridx = crypto.randomInt(RIDDLE_BANK.length);
+        const riddle = RIDDLE_BANK[ridx];
+        const { arr, correctCell } = makeGridNumbers(riddle.answer);
+
+        const q = await client.query(
+          `UPDATE fragment_ciphers
+              SET chosen_num     = NULL,
+                  chosen_cell    = NULL,
+                  chosen_rune_id = NULL,
+                  answered_at    = NULL,
+                  grid_numbers   = $3::int[],
+                  correct_num    = $4,
+                  correct_cell   = $5,
+                  riddle_key     = $6
+            WHERE tg_id = $1 AND frag_id = $2`,
+          [tg_id, fragId, arr, riddle.answer, correctCell, riddle.key]
+        );
+        reset += q.rowCount;
+      }
+
+      await client.query('COMMIT');
+      return res.json({ ok: true, reset, fragments: list.map(x => Number(x.frag_id)) });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   } catch (e) {
     console.error('[POST /debug/reset-ciphers] ERROR', e);
     res.status(500).json({ error: 'internal' });
   }
 });
-
 
 /**
  * GET /api/runes/urls?ids=101,202,...
