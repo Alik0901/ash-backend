@@ -968,6 +968,7 @@ router.delete('/player/:tg_id', async (req, res) => {
     await client.query('BEGIN');
     await client.query(`DELETE FROM referrals WHERE referrer_id = $1 OR referred_id = $1`, [req.user.tg_id]);
     await client.query(`DELETE FROM burn_invoices WHERE tg_id = $1`, [req.user.tg_id]);
+    await client.query(`DELETE FROM fragment_ciphers WHERE tg_id = $1`, [req.user.tg_id]);
     await client.query(`DELETE FROM players WHERE tg_id = $1`, [req.user.tg_id]);
     await client.query('COMMIT');
     return res.json({ ok: true });
