@@ -117,6 +117,12 @@ function shuffleInPlace(arr) {
   return arr;
 }
 
+function abs(req, path) {
+  const host  = req.get('x-forwarded-host') || req.get('host');
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
+  return `${proto}://${host}${path}`;
+}
+
 /** Build a 4x4 grid of unique numbers (0..99) with a guaranteed correct value. */
 function makeGridNumbers(correctNum) {
   const set = new Set([correctNum]);
@@ -433,12 +439,13 @@ router.get('/cipher/all', async (_req, res) => {
     }
 
     let urls;
-    if (String(res.req.query.includeUrls || '') === '1') {
+    const include = String(res.req.query.includeUrls ?? '').toLowerCase();
+    if (include === '1' || include === 'true') {
       urls = {};
       for (const id of runeIds) {
         const name = RUNE_ASSETS[id];
         if (!name) continue;
-        urls[id] = signAssetUrl('/runes', name, RUNE_URL_TTL_SEC);
+        urls[id] = abs(res.req, signAssetUrl('/runes', name, RUNE_URL_TTL_SEC));
       }
     }
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -483,7 +490,7 @@ router.get('/cipher/:fragId', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'cipher_not_found' });
 
     const row = rows[0];
-    const url = signAssetUrl('/riddles', row.riddle_key, RIDDLE_URL_TTL_SEC);
+    const url = abs(req, signAssetUrl('/riddles', row.riddle_key, RIDDLE_URL_TTL_SEC));
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.set('Pragma', 'no-cache');
@@ -1175,7 +1182,7 @@ router.get('/runes/urls', async (req, res) => {
     for (const id of ids) {
       const name = RUNE_ASSETS[id];
       if (!name) continue;
-      urls[id] = signAssetUrl('/runes', name, RUNE_URL_TTL_SEC);
+      urls[id] = abs(req, signAssetUrl('/runes', name, RUNE_URL_TTL_SEC));
     }
     return res.json({ urls });
   } catch (err) {
