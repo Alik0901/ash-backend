@@ -124,7 +124,7 @@ function abs(req, path) {
 }
 
 /** Build a 4x4 grid of unique numbers (0..99) with a guaranteed correct value. */
-function makeGridNumbers(correctNum) {
+function makeGridNumbers(correctNum, bannedCells = []) {
   const set = new Set([correctNum]);
   while (set.size < 16) {
     const n = crypto.randomInt(100);
@@ -132,7 +132,22 @@ function makeGridNumbers(correctNum) {
   }
   const arr = Array.from(set);
   shuffleInPlace(arr);
-  const correctCell = arr.findIndex((n) => n === correctNum);
+  let correctCell = arr.findIndex((n) => n === correctNum);
+
+  // Если “правильная” ячейка уже встречалась у этого игрока — переносим её.
+  if (Array.isArray(bannedCells) && bannedCells.includes(correctCell)) {
+    const all = Array.from({ length: 16 }, (_, i) => i);
+    const allowed = all.filter((i) => !bannedCells.includes(i));
+    if (allowed.length) {
+      const newIdx = crypto.randomInt(allowed.length);
+      const target = allowed[newIdx];
+      // Меняем местами correctNum и число из target-ячейки
+      const tmp = arr[target];
+      arr[target] = correctNum;
+      arr[correctCell] = tmp;
+      correctCell = target;
+    }
+  }
   return { arr, correctCell };
 }
 
@@ -149,9 +164,17 @@ async function ensureCipherForFragment(clientOrPool, tgId, fragId) {
   );
   if (existing.length) return;
 
+  const { rows: usedRows } = await db.query(
+    `SELECT correct_cell FROM fragment_ciphers WHERE tg_id=$1`,
+    [tgId]
+  );
+  const banned = usedRows
+    .map(r => Number(r.correct_cell))
+    .filter(n => Number.isFinite(n));
+
   const ridx = crypto.randomInt(RIDDLE_BANK.length);
   const riddle = RIDDLE_BANK[ridx];
-  const { arr: grid, correctCell } = makeGridNumbers(riddle.answer);
+  const { arr: grid, correctCell } = makeGridNumbers(riddle.answer, banned);
 
   await db.query(
     `INSERT INTO fragment_ciphers
@@ -1119,10 +1142,19 @@ router.post('/debug/reset-ciphers', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      // берём все существующие персональные шифры игрока
+      // все персональные шифры игрока
       const { rows: list } = await client.query(
         `SELECT frag_id FROM fragment_ciphers WHERE tg_id = $1 ORDER BY frag_id`,
         [tg_id]
+      );
+
+      // прочитаем текущие позиции правильного ответа (до изменений)
+      const { rows: beforeRows } = await client.query(
+        `SELECT frag_id, correct_cell FROM fragment_ciphers WHERE tg_id=$1`,
+        [tg_id]
+      );
+      const usedByFrag = new Map(
+        beforeRows.map(x => [Number(x.frag_id), Number(x.correct_cell)])
       );
 
       let reset = 0;
@@ -1133,7 +1165,15 @@ router.post('/debug/reset-ciphers', async (req, res) => {
         // новая загадка и новая 4×4 сетка с гарантированным правильным числом
         const ridx = crypto.randomInt(RIDDLE_BANK.length);
         const riddle = RIDDLE_BANK[ridx];
-        const { arr, correctCell } = makeGridNumbers(riddle.answer);
+
+        // запрещаем уже занятые другими фрагментами позиции
+        const banned = Array.from(usedByFrag.entries())
+          .filter(([fid]) => fid !== fragId)
+          .map(([, cell]) => cell)
+          .filter(n => Number.isFinite(n));
+
+        // ВАЖНО: makeGridNumbers должна поддерживать сигнатуру (answer, banned)
+        const { arr, correctCell } = makeGridNumbers(riddle.answer, banned);
 
         const q = await client.query(
           `UPDATE fragment_ciphers
@@ -1149,6 +1189,9 @@ router.post('/debug/reset-ciphers', async (req, res) => {
           [tg_id, fragId, arr, riddle.answer, correctCell, riddle.key]
         );
         reset += q.rowCount;
+
+        // фиксируем новую позицию, чтобы дальше её не использовать
+        usedByFrag.set(fragId, correctCell);
       }
 
       await client.query('COMMIT');
@@ -1164,6 +1207,7 @@ router.post('/debug/reset-ciphers', async (req, res) => {
     res.status(500).json({ error: 'internal' });
   }
 });
+
 
 /**
  * GET /api/runes/urls?ids=101,202,...
