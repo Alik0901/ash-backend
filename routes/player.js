@@ -64,14 +64,14 @@ const RUNE_ASSETS = {
 
 /** Riddle bank: key = file name in /public/riddles, answer = number 0..99 */
 const RIDDLE_BANK = [
-  { key: 'riddle_01.png', answer: 1 },
-  { key: 'riddle_02.png', answer: 1 },
-  { key: 'riddle_03.png', answer: 1 },
-  { key: 'riddle_04.png', answer: 1 },
-  { key: 'riddle_05.png', answer: 1 },
-  { key: 'riddle_06.png', answer: 1 },
-  { key: 'riddle_07.png', answer: 1 },
-  { key: 'riddle_08.png', answer: 1 },
+  { key: 'riddle_01.png', answer: 48 },
+  { key: 'riddle_02.png', answer: 20 },
+  { key: 'riddle_03.png', answer: 30 },
+  { key: 'riddle_04.png', answer: 60 },
+  { key: 'riddle_05.png', answer: 10 },
+  { key: 'riddle_06.png', answer: 35 },
+  { key: 'riddle_07.png', answer: 50 },
+  { key: 'riddle_08.png', answer: 48 },
 ];
 
 /* ── Small helpers ────────────────────────────────────────────────────── */
@@ -150,6 +150,22 @@ function makeGridNumbers(correctNum, bannedCells = []) {
   }
   return { arr, correctCell };
 }
+
+  function sanitizeTaskForClient(task) {
+    if (!task || task.type !== 'quiz') return task;
+    const { rarity } = task;
+    const q = task.params || {};
+    return {
+      type: 'quiz',
+      rarity,
+      params: {
+        question: q.question || '',
+        options: Array.isArray(q.options) ? q.options : [],
+        // ВАЖНО: без answer
+      },
+    };
+  }
+
 
 /**
  * Ensure a personal cipher exists for (tg_id, frag_id). No-op if already present.
@@ -588,19 +604,79 @@ router.post('/burn-invoice', async (req, res) => {
     let rarity = 'common';
     for (const [k, w] of Object.entries(weights)) { if (r < w) { rarity = k; break; } r -= w; }
 
-    // Quiz bank per rarity
-    const quizzes = {
-      common:    { question: 'Which element is associated with fire?', options: ['Water', 'Earth', 'Fire', 'Air'], answer: 'Fire' },
-      uncommon:  { question: 'A synonym for "burn"?',                  options: ['Freeze', 'Scorch', 'Flow', 'Sink'], answer: 'Scorch' },
-      rare:      { question: 'What consumes oxygen and gives heat?',   options: ['Ice', 'Fire'], answer: 'Fire' },
-      legendary: { question: 'Type the word "Fire" exactly:',          options: [], answer: 'Fire' },
+    /** Quiz bank per rarity */
+    const QUIZ_BANK = {
+      common: [
+        { question: 'Which element is associated with fire?', options: ['Water', 'Earth', 'Fire', 'Air'], answer: 'Fire' },
+        { question: 'What color are hot embers usually?', options: ['Blue', 'Red', 'Green', 'Purple'], answer: 'Red' },
+        { question: 'Which one is hot?', options: ['Ice', 'Flame', 'Snow', 'Fog'], answer: 'Flame' },
+        { question: 'Opposite of “cold”?', options: ['Dark', 'Hot', 'Wet', 'Dust'], answer: 'Hot' },
+        { question: 'Best fuel for a campfire?', options: ['Stone', 'Water', 'Wood', 'Glass'], answer: 'Wood' },
+        { question: 'Which symbol means multiplication?', options: ['÷', '×', '−', '+'], answer: '×' },
+        { question: 'What color is ash most often?', options: ['Gray', 'Pink', 'Blue', 'Yellow'], answer: 'Gray' },
+        { question: 'Heat naturally flows from…', options: ['Cold to hot', 'Hot to cold', 'Down to up', 'Left to right'], answer: 'Hot to cold' },
+        { question: 'What do flames need to burn?', options: ['Oxygen', 'Salt', 'Iron', 'Plastic'], answer: 'Oxygen' },
+        { question: 'Which season is usually the hottest?', options: ['Winter', 'Spring', 'Summer', 'Autumn'], answer: 'Summer' }
+      ],
+      uncommon: [
+        { question: 'A synonym for “burn”?', options: ['Freeze', 'Scorch', 'Flow', 'Sink'], answer: 'Scorch' },
+        { question: 'Charred wood turns into…', options: ['Ash', 'Ice', 'Steam', 'Clay'], answer: 'Ash' },
+        { question: 'Which word means “to ignite”?', options: ['Kindle', 'Mend', 'Bury', 'Knead'], answer: 'Kindle' },
+        { question: 'A safe indoor place for fire is a…', options: ['Hearth', 'Vase', 'Shelf', 'Bucket'], answer: 'Hearth' },
+        { question: 'Which gas supports burning in air?', options: ['Oxygen', 'Nitrogen', 'Helium', 'Carbon dioxide'], answer: 'Oxygen' },
+        { question: 'Main solid fuel in a candle?', options: ['Wax', 'Water', 'Sand', 'Salt'], answer: 'Wax' },
+        { question: 'Least flammable here?', options: ['Dry paper', 'Wet cloth', 'Gasoline', 'Wood shavings'], answer: 'Wet cloth' },
+        { question: 'Which icon warns about fire?', options: ['🔥', '❄️', '💧', '🍃'], answer: '🔥' },
+        { question: 'Opposite of “ignite”?', options: ['Extinguish', 'Brighten', 'Sharpen', 'Combine'], answer: 'Extinguish' },
+        { question: 'Tiny hot pieces from a fire are…', options: ['Embers', 'Pebbles', 'Bubbles', 'Crumbs'], answer: 'Embers' }
+      ],
+      rare: [
+        { question: 'What consumes oxygen and gives heat?', options: ['Ice', 'Fire'], answer: 'Fire' },
+        { question: 'Smoke with too little oxygen is often…', options: ['Black', 'Blue'], answer: 'Black' },
+        { question: 'Safe to pour on a wood fire?', options: ['Water', 'Gasoline'], answer: 'Water' },
+        { question: 'Which is NOT in the fire triangle?', options: ['Oxygen', 'Fuel', 'Time'], answer: 'Time' },
+        { question: 'Which shines brighter?', options: ['Ember', 'Flame'], answer: 'Flame' },
+        { question: 'Device that detects smoke?', options: ['Smoke detector', 'Thermometer'], answer: 'Smoke detector' },
+        { question: 'Which is hotter?', options: ['100°C', '200°C'], answer: '200°C' },
+        { question: 'What reduces a campfire?', options: ['Add air', 'Smother with sand'], answer: 'Smother with sand' },
+        { question: 'Water on an oil fire is…', options: ['Dangerous', 'Safe'], answer: 'Dangerous' },
+        { question: 'Which material is fire-resistant?', options: ['Asbestos', 'Paper'], answer: 'Asbestos' }
+      ],
+      legendary: [
+        { question: 'Type the word "Fire" exactly:', options: [], answer: 'Fire' },
+        { question: 'Type the word "Ash" exactly:', options: [], answer: 'Ash' },
+        { question: 'Type the word "Flame" exactly:', options: [], answer: 'Flame' },
+        { question: 'Type the word "Ember" exactly:', options: [], answer: 'Ember' },
+        { question: 'Type the word "Smoke" exactly:', options: [], answer: 'Smoke' },
+        { question: 'Type the word "Spark" exactly:', options: [], answer: 'Spark' },
+        { question: 'Type the word "Torch" exactly:', options: [], answer: 'Torch' },
+        { question: 'Type the word "Burn" exactly:', options: [], answer: 'Burn' },
+        { question: 'Type the word "Heat" exactly:', options: [], answer: 'Heat' },
+        { question: 'Type the word "Inferno" exactly:', options: [], answer: 'Inferno' }
+      ]
     };
-    const task = { type: 'quiz', rarity, params: quizzes[rarity] };
+
+    /** Pick one quiz by rarity and shuffle options (cryptographically). */
+    function pickQuiz(rarity = 'common') {
+      const pool = QUIZ_BANK[rarity] || QUIZ_BANK.common;
+      const base = pool[crypto.randomInt(pool.length)];
+      const q = {
+        question: base.question,
+        options: Array.isArray(base.options) ? [...base.options] : [],
+        answer: String(base.answer),
+      };
+      if (q.options.length > 1) shuffleInPlace(q.options);
+      return q;
+    }
+
+    // Выбираем один вопрос по редкости и перемешиваем варианты
+    const quiz = pickQuiz(rarity);
+    const task = { type: 'quiz', rarity, params: quiz };
 
     await pool.query(
       `INSERT INTO burn_invoices
-         (invoice_id,tg_id,amount_nano,address,comment,status,quest_data,quest_status,created_at,processed)
-       VALUES($1,$2,$3,$4,$5,'pending',$6,'pending',NOW(),FALSE)`,
+        (invoice_id,tg_id,amount_nano,address,comment,status,quest_data,quest_status,created_at,processed)
+      VALUES($1,$2,$3,$4,$5,'pending',$6,'pending',NOW(),FALSE)`,
       [invoiceId, tg_id, AMOUNT_NANO, TON_ADDR, comment, task]
     );
 
@@ -618,7 +694,7 @@ router.post('/burn-invoice', async (req, res) => {
       invoiceId,
       paymentUrl:  `${TONHUB_URL}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
       tonspaceUrl: `${TONSPACE_SCHEME}/${TON_ADDR}?amount=${AMOUNT_NANO}&text=${comment}`,
-      task,
+      task: sanitizeTaskForClient(task),
       paid: autoPay,
     });
   } catch (err) {
@@ -647,7 +723,7 @@ router.get('/burn-status/:invoiceId', async (req, res) => {
     }
     if (inv.status !== 'paid') return res.json({ paid: false });
 
-    return res.json({ paid: true, task: inv.quest_data || null, processed: false });
+    return res.json({ paid: true, task: sanitizeTaskForClient(inv.quest_data || null), processed: false });
   } catch (err) {
     return res.status(500).json({ error: 'internal' });
   }
@@ -748,7 +824,7 @@ router.post('/cipher-answer/:fragId', async (req, res) => {
  * Idempotent result submission. On success -> run burn logic.
  */
 router.post('/burn-complete/:invoiceId', async (req, res) => {
-  const { success } = req.body;
+  const { success, answer } = req.body;
   if (typeof success !== 'boolean') {
     return res.status(400).json({ error: 'success boolean required' });
   }
@@ -759,7 +835,7 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
 
     // Lock invoice
     const { rows: [inv] } = await client.query(
-      `SELECT invoice_id, tg_id, status, processed, quest_status, result_json
+      `SELECT invoice_id, tg_id, status, processed, quest_status, result_json, quest_data
          FROM burn_invoices
         WHERE invoice_id=$1
         FOR UPDATE`,
@@ -781,6 +857,43 @@ router.post('/burn-complete/:invoiceId', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'invoice not paid' });
     }
+
+    // Если клиент говорит "success: true", проверим ответ против quest_data (если есть)
+    if (success && inv.quest_data && inv.quest_data.type === 'quiz') {
+      const correct = String(inv.quest_data?.params?.answer ?? '');
+      if (correct) {
+        const provided = String(answer ?? '');
+        if (provided !== correct) {
+          // Неверный ответ — считаем провалом квеста в ЭТОЙ ЖЕ транзакции
+          const { rows: [pl] } = await client.query(
+            `SELECT pity_counter FROM players WHERE tg_id=$1 FOR UPDATE`,
+            [inv.tg_id]
+          );
+          const newPity = Number(pl?.pity_counter || 0) + 1;
+
+          await client.query(
+            `UPDATE players SET pity_counter=$2 WHERE tg_id=$1`,
+            [inv.tg_id, newPity]
+          );
+
+          const result = { ok: false, pity_counter: newPity };
+
+          await client.query(
+            `UPDATE burn_invoices
+                SET quest_status='failed',
+                    processed=TRUE,
+                    result_json=$2
+              WHERE invoice_id=$1`,
+            [req.params.invoiceId, result]
+          );
+
+          await client.query('COMMIT');
+          return res.json(result);
+        }
+      }
+    }
+
+
 
     if (!success) {
       // Idempotent fail: pity+1, mark as processed and store result
